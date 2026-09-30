@@ -4,6 +4,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QTimer>
+#include <cstdio>
 
 int main(int argc, char **argv) {
   QGuiApplication app(argc, argv);
@@ -82,6 +83,10 @@ int main(int argc, char **argv) {
   }
   // X11 selections are owned by a client. Keep this tiny process alive long
   // enough for a clipboard manager or the target application to request it.
+  if (arguments.contains("--notify-ready")) {
+    std::puts("ready");
+    std::fflush(stdout);
+  }
   QTimer::singleShot(60000, &app, &QCoreApplication::quit);
   return app.exec();
 }

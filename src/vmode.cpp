@@ -1,3 +1,4 @@
+#include "common/qt_helpers.hpp"
 #include <QApplication>
 #include <QDateTime>
 #include <QDir>
@@ -63,12 +64,7 @@ static QJsonArray hotwords() {
                       {"seq", QDateTime::currentMSecsSinceEpoch()},
                       {"epoch", 1},
                       {"op", "hotword_list"}};
-  socket.write(QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n');
-  socket.waitForBytesWritten(1000);
-  if (!socket.waitForReadyRead(2000))
-    return {};
-  return QJsonDocument::fromJson(socket.readAll())
-      .object()
+  return wetype::localRequest(socket, request, 2000)
       .value("hotwords")
       .toArray();
 }
@@ -88,7 +84,6 @@ int main(int argc, char **argv) {
   int y = argc > 3 ? QString::fromLocal8Bit(argv[3]).toInt() : 0;
   QWidget window(nullptr,
                  Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-  window.setAttribute(Qt::WA_DeleteOnClose);
   window.setStyleSheet(
       "QWidget{background:#f7f7f7;color:#202124;font:14px 'Noto Sans CJK SC';}"
       "QPushButton{background:white;border:1px solid "

@@ -105,6 +105,11 @@ static std::pair<std::string, std::string> splitPair(const std::string &text) {
   return {text.substr(0, first), text.substr(first)};
 }
 static std::string formatPinyinPreedit(const std::string &raw) {
+  // Uppercase letters participate in the original core's mixed-case/English
+  // composition. Keep their raw spelling while awaiting its display text.
+  if (std::any_of(raw.begin(), raw.end(),
+                  [](unsigned char c) { return c >= 'A' && c <= 'Z'; }))
+    return raw;
   auto begin = std::find_if(raw.begin(), raw.end(), [](unsigned char c) {
     return (c >= 'a' && c <= 'z') || c == '\'';
   });
@@ -184,7 +189,7 @@ static size_t displayCursorForRaw(const std::string &raw,
 }
 class WeType;
 struct State : InputContextProperty {
-  uint64_t id, epoch = 1, seq = 0, applied = 0, revision = 0;
+  uint64_t id, epoch = 1, seq = 0, applied = 0, revision = 0, inputSeq = 0;
   uint64_t cloudPollUntil = 0, lastCloudPoll = 0;
   int candidatePage = 0, candidateCursor = 0;
   std::string preedit;
@@ -199,6 +204,7 @@ struct State : InputContextProperty {
   bool english = false, fullWidth = false, traditional = false,
        englishPunctuation = false, vMode = false;
   bool selectionPending = false;
+  bool active = false;
   KeySym modifierCandidate = FcitxKey_None;
   TrackableObjectReference<InputContext> ic;
   State(uint64_t n, InputContext &context) : id(n), ic(context.watch()) {}
@@ -240,6 +246,7 @@ class WeType : public InputMethodEngine {
   uint64_t lastVModeVersion_ = 0;
   std::string inbound_, outbound_;
   bool voiceRecording_ = false, voiceHold_ = false;
+  uint64_t voiceSession_ = 0, voiceEpoch_ = 0;
   pid_t syncChild_ = -1;
   void startSync() {
     if (syncChild_ > 0 && waitpid(syncChild_, nullptr, WNOHANG) == 0)
@@ -311,6 +318,18 @@ class WeType : public InputMethodEngine {
     auto byte = utf8::ncharByteLength(text.begin(), surrounding.cursor());
     return byte >= 0 && size_t(byte) <= text.size() &&
            text.compare(size_t(byte), expected.size(), expected) == 0;
+  }
+  static bool previousSurroundingTextIs(InputContext *ic,
+                                        const std::string &expected) {
+    const auto &surrounding = ic->surroundingText();
+    if (!surrounding.isValid() || surrounding.cursor() != surrounding.anchor())
+      return false;
+    const auto &text = surrounding.text();
+    auto byte = utf8::ncharByteLength(text.begin(), surrounding.cursor());
+    return byte >= 0 && size_t(byte) <= text.size() &&
+           size_t(byte) >= expected.size() &&
+           text.compare(size_t(byte) - expected.size(), expected.size(),
+                        expected) == 0;
   }
   std::string mappedSymbol(State *s, char ascii, bool asciiMode) const {
     const auto *entry = punctuationEntry(ascii);
@@ -545,9 +564,11 @@ class WeType : public InputMethodEngine {
         boolSetting("select_semicolon_quote", false));
     shortcuts->selectCtrl.setValue(boolSetting("select_ctrl", false));
     auto loadKeys = [&](auto &option, const char *name) {
-      auto value = wire::str(j.get(), name);
-      if (!value.empty())
-        option.setValue(Key::keyListFromString(value));
+      auto *value = wire::get(j.get(), name);
+      if (value && json_object_is_type(value, json_type_string))
+        option.setValue(Key::keyListFromString(wire::str(j.get(), name)));
+      else
+        option.reset();
     };
     loadKeys(shortcuts->languageSwitchKeys, "language_switch_keys");
     loadKeys(shortcuts->aiAssistantKeys, "ai_assistant_keys");
@@ -812,7 +833,7 @@ class WeType : public InputMethodEngine {
     }
   }
   void startVoice(InputContext *ic, bool hold) {
-    if (voiceRecording_)
+    if (voiceRecording_ || ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
     auto *s = state(ic);
     if (!s->preedit.empty()) {
@@ -825,6 +846,8 @@ class WeType : public InputMethodEngine {
     }
     voiceRecording_ = true;
     voiceHold_ = hold;
+    voiceSession_ = s->id;
+    voiceEpoch_ = s->epoch;
     startProcess({WETYPE_VOICE, "start"});
   }
   void stopVoice() {
@@ -832,7 +855,8 @@ class WeType : public InputMethodEngine {
       return;
     voiceRecording_ = false;
     voiceHold_ = false;
-    startProcess({WETYPE_VOICE, "stop"});
+    startProcess({WETYPE_VOICE, "stop", std::to_string(voiceSession_),
+                  std::to_string(voiceEpoch_)});
   }
   void receiveVoice() {
     std::ifstream input(stateDirectory() / "voice-inbox.json");
@@ -845,11 +869,20 @@ class WeType : public InputMethodEngine {
     if (!version || version <= lastVoiceVersion_ || text.empty())
       return;
     lastVoiceVersion_ = version;
-    for (auto &[id, ref] : contexts_)
-      if (auto *ic = ref.get(); ic && ic->hasFocus()) {
-        ic->commitString(text);
-        break;
-      }
+    std::error_code error;
+    std::filesystem::remove(stateDirectory() / "voice-inbox.json", error);
+    const auto session = uint64_t(wire::number(message.get(), "session"));
+    const auto epoch = uint64_t(wire::number(message.get(), "epoch"));
+    auto it = contexts_.find(session);
+    if (it == contexts_.end())
+      return;
+    auto *ic = it->second.get();
+    if (!ic || !ic->hasFocus() ||
+        ic->capabilityFlags().test(CapabilityFlag::Password))
+      return;
+    auto *s = ic->propertyFor(&factory_);
+    if (s->active && s->epoch == epoch)
+      ic->commitString(text);
   }
   void receiveVModeAction() {
     auto path = stateDirectory() / "vmode-action.json";
@@ -869,7 +902,8 @@ class WeType : public InputMethodEngine {
     if (it == contexts_.end())
       return;
     auto *ic = it->second.get();
-    if (!ic || !ic->hasFocus())
+    if (!ic || !ic->hasFocus() ||
+        ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
     const auto action = wire::str(message.get(), "action");
     if (action != "commit")
@@ -878,6 +912,8 @@ class WeType : public InputMethodEngine {
     if (text.empty() || text.size() > 65536)
       return;
     auto *s = state(ic);
+    if (!s->active || !s->vMode)
+      return;
     send(ic, "reset");
     s->vMode = false;
     s->preedit.clear();
@@ -899,17 +935,28 @@ class WeType : public InputMethodEngine {
         : !s->vMode && *config_.input->mode == wetype_config::InputMode::Pinyin
             ? formatPinyinPreedit(s->preedit)
             : s->preedit;
-    Text text(displayed);
-    text.setCursor(!s->displayPreedit.empty()
-                       ? std::min(s->displayCursor, displayed.size())
-                       : displayCursorForRaw(s->preedit, displayed, s->cursor));
-    ic->inputPanel().setClientPreedit(text);
-    // Windows 2.1.3.18 shows composition inline in the target application;
-    // the candidate bar contains candidates only.
-    ic->inputPanel().setPreedit(Text());
-    ic->inputPanel().setAuxDown(Text(failed_   ? "WeTypeX 核心正在恢复…"
-                                     : !ready_ ? "WeTypeX 核心启动中…"
-                                               : ""));
+    // Text("") contains one empty segment and is not empty to Fcitx UI.
+    Text text;
+    if (!displayed.empty()) {
+      text.append(displayed);
+      text.setCursor(
+          !s->displayPreedit.empty()
+              ? std::min(s->displayCursor, displayed.size())
+              : displayCursorForRaw(s->preedit, displayed, s->cursor));
+    }
+    const bool inlinePreedit =
+        ic->capabilityFlags().test(CapabilityFlag::Preedit) &&
+        ic->isPreeditEnabled();
+    ic->inputPanel().setClientPreedit(inlinePreedit ? text : Text());
+    // Clients without inline preedit (including some terminal setups) need
+    // to see the composition in the input panel.
+    ic->inputPanel().setPreedit(inlinePreedit ? Text() : text);
+    Text status;
+    if (!displayed.empty() && (failed_ || !ready_))
+      status.append(failed_ ? "WeTypeX 核心正在恢复…" : "WeTypeX 核心启动中…");
+    ic->inputPanel().setAuxDown(status);
+    if (s->preedit.empty() && !s->vMode)
+      ic->inputPanel().setCandidateList(nullptr);
     ic->updatePreedit();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
   }
@@ -941,17 +988,29 @@ class WeType : public InputMethodEngine {
     failed_ = true;
     restartNeedsOpen_ = true;
     scheduleRestart();
+    invalidateSessions();
+  }
+  void invalidateSessions() {
+    restartNeedsOpen_ = true;
     for (auto &[id, ref] : contexts_)
-      if (auto *ic = ref.get(); ic && ic->hasFocus()) {
-        auto *s = state(ic);
+      if (auto *ic = ref.get()) {
+        auto *s = ic->propertyFor(&factory_);
         ++s->epoch;
-        s->seq = s->applied = 0;
+        s->seq = s->applied = s->inputSeq = 0;
         s->selectionPending = false;
         s->preedit.clear();
         s->cursor = 0;
         clearDisplayState(s);
-        ic->inputPanel().setCandidateList(nullptr);
-        panel(ic, s);
+        s->vMode = false;
+        s->cloudPollUntil = 0;
+        s->pendingPairKey = 0;
+        s->pendingPairRight.clear();
+        s->symbolAutoState = 0;
+        if (s->active) {
+          ic->inputPanel().reset();
+          if (ic->hasFocus())
+            panel(ic, s);
+        }
       }
   }
   bool start() {
@@ -1072,6 +1131,9 @@ class WeType : public InputMethodEngine {
     auto json = wire::object();
     wire::put(json.get(), "session", int64_t(s->id));
     wire::put(json.get(), "seq", int64_t(++s->seq));
+    if (std::string_view(op) == "key" || std::string_view(op) == "backspace" ||
+        std::string_view(op) == "delete" || std::string_view(op) == "move")
+      s->inputSeq = s->seq;
     wire::put(json.get(), "epoch", int64_t(s->epoch));
     wire::put(json.get(), "op", std::string(op));
     wire::put(json.get(), "key", key);
@@ -1149,7 +1211,7 @@ class WeType : public InputMethodEngine {
         restartNeedsOpen_ = false;
         for (auto &[id, ref] : contexts_)
           if (auto *ic = ref.get();
-              ic && ic->hasFocus() &&
+              ic && ic->hasFocus() && ic->propertyFor(&factory_)->active &&
               !ic->capabilityFlags().test(CapabilityFlag::Password))
             send(ic, "open");
       }
@@ -1166,11 +1228,13 @@ class WeType : public InputMethodEngine {
     }
     auto *s = state(ic);
     auto seq = uint64_t(wire::number(j.get(), "seq"));
-    if (seq <= s->applied)
+    if (uint64_t(wire::number(j.get(), "epoch")) != s->epoch ||
+        seq <= s->applied || seq > s->seq)
       return;
     s->applied = seq;
     activity_ = now(CLOCK_MONOTONIC);
-    if (uint64_t(wire::number(j.get(), "epoch")) != s->epoch || !ic->hasFocus())
+    if (!s->active || !ic->hasFocus() ||
+        ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
     auto *commits = wire::get(j.get(), "commits");
     if (commits && json_object_is_type(commits, json_type_array))
@@ -1222,13 +1286,16 @@ class WeType : public InputMethodEngine {
     list->setLayoutHint(vertical_ ? CandidateLayoutHint::Vertical
                                   : CandidateLayoutHint::Horizontal);
     auto *candidates = wire::get(j.get(), "candidates");
-    if (candidates && json_object_is_type(candidates, json_type_array))
+    if ((!s->preedit.empty() || s->vMode) && candidates &&
+        json_object_is_type(candidates, json_type_array))
       for (size_t i = 0;
            i < std::min(size_t(50), json_object_array_length(candidates));
            i++) {
         auto *v = json_object_array_get_idx(candidates, i);
-        if (json_object_is_type(v, json_type_string)) {
-          std::string display = std::to_string(i % pageSize_ + 1);
+        if (json_object_is_type(v, json_type_string) &&
+            json_object_get_string_len(v)) {
+          std::string display =
+              std::to_string(list->totalSize() % pageSize_ + 1);
           display += json_object_get_string(v);
           list->append<Word>(this, std::move(display), i, s->revision);
         }
@@ -1269,8 +1336,8 @@ public:
           for (auto &[id, ref] : contexts_)
             if (auto *ic = ref.get()) {
               auto *s = ic->propertyFor(&factory_);
-              pending |= s->seq > s->applied;
-              if (networkEnabled_ && ready_ && ic->hasFocus() &&
+              pending |= s->active && s->seq > s->applied;
+              if (networkEnabled_ && ready_ && s->active && ic->hasFocus() &&
                   !s->preedit.empty() && s->seq == s->applied &&
                   time < s->cloudPollUntil &&
                   time >= s->lastCloudPoll + 100000) {
@@ -1321,6 +1388,7 @@ public:
       stopSync();
     }
     stop();
+    invalidateSessions();
     if (!start()) {
       failed_ = true;
       scheduleRestart();
@@ -1337,6 +1405,7 @@ public:
     else
       stopSync();
     stop();
+    invalidateSessions();
     if (!start()) {
       failed_ = true;
       scheduleRestart();
@@ -1351,15 +1420,18 @@ public:
     reloadSettings();
     if (networkEnabled_) {
       startSync();
-    }
+    } else
+      stopSync();
     auto *ic = e.inputContext();
     auto *current = state(ic);
+    current->active = true;
     current->english = *config_.input->defaultLanguage ==
                        wetype_config::DefaultLanguage::English;
     current->traditional = false;
     ic->statusArea().addAction(StatusGroup::InputMethod, &settingsAction_);
     if (ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
+    panel(ic, current);
     send(ic, "open");
   }
   void reset(const InputMethodEntry &, InputContextEvent &e) override {
@@ -1382,17 +1454,21 @@ public:
   }
   void deactivate(const InputMethodEntry &entry,
                   InputContextEvent &e) override {
+    state(e.inputContext())->active = false;
     reset(entry, e);
     if (child_ > 0)
       send(e.inputContext(), "close");
   }
   void select(InputContext *ic, unsigned index, int64_t revision = -1) {
     auto *s = state(ic);
-    if (s->selectionPending)
+    if (s->selectionPending || !s->active || !ic->hasFocus() ||
+        ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
     auto *list = dynamic_cast<CommonCandidateList *>(
         ic->inputPanel().candidateList().get());
-    if (!list || index >= unsigned(list->totalSize()))
+    if (revision >= 0 && (!list || index >= unsigned(list->totalSize())))
+      return;
+    if (revision < 0 && s->preedit.empty())
       return;
     if (!send(ic, "select", "", index, revision))
       return;
@@ -1406,11 +1482,48 @@ public:
     // response's empty preedit and refresh the panel.
     panel(ic, s);
   }
+  bool selectByKey(InputContext *ic, int pageIndex = -1) {
+    auto *s = state(ic);
+    if (pageIndex >= pageSize_)
+      return false;
+    if (s->selectionPending)
+      return true;
+    // Preserve engine request order when a selection key follows typing
+    // before its candidates arrive. The backend resolves the queued index
+    // after processing those letters.
+    if (s->inputSeq > s->applied) {
+      const unsigned index =
+          pageIndex < 0 ? unsigned(s->candidateCursor)
+                        : unsigned(s->candidatePage * pageSize_ + pageIndex);
+      select(ic, index);
+      return true;
+    }
+    auto candidates = ic->inputPanel().candidateList();
+    auto *list = dynamic_cast<CommonCandidateList *>(candidates.get());
+    const int index = pageIndex < 0 && list ? std::max(list->cursorIndex(), 0)
+                                            : std::max(pageIndex, 0);
+    if (list && index < list->size()) {
+      list->candidate(index).select(ic);
+      return true;
+    }
+    // A composition with no candidates can still be committed as raw text.
+    if (pageIndex < 0 && !s->preedit.empty()) {
+      if (send(ic, "raw")) {
+        s->selectionPending = true;
+        ic->inputPanel().setCandidateList(nullptr);
+        panel(ic, s);
+      }
+      return true;
+    }
+    return false;
+  }
   void keyEvent(const InputMethodEntry &, KeyEvent &e) override {
     auto key = e.key();
     auto *ic = e.inputContext();
     auto *s = state(ic);
     auto sym = key.sym();
+    if (!s->active || ic->capabilityFlags().test(CapabilityFlag::Password))
+      return;
     const bool shiftModifier =
         sym == FcitxKey_Shift_L || sym == FcitxKey_Shift_R;
     const bool ctrlModifier =
@@ -1434,11 +1547,8 @@ public:
         const bool third =
             sym == FcitxKey_Control_R ||
             releasedConfiguredKey(*config_.shortcuts->thirdCandidateKeys);
-        auto *list = dynamic_cast<CommonCandidateList *>(
-            ic->inputPanel().candidateList().get());
         const unsigned pageIndex = third ? 2 : 1;
-        if (list && pageIndex < unsigned(list->size()))
-          list->candidate(pageIndex).select(ic);
+        selectByKey(ic, pageIndex);
         s->modifierCandidate = FcitxKey_None;
         e.filterAndAccept();
         return;
@@ -1609,8 +1719,7 @@ public:
     }
     if (s->vMode && sym >= 0x20 && sym <= 0x7e) {
       if (sym == FcitxKey_space) {
-        if (list && list->totalSize())
-          list->candidate(std::max(list->cursorIndex(), 0)).select(ic);
+        selectByKey(ic);
         e.filterAndAccept();
         return;
       }
@@ -1719,8 +1828,7 @@ public:
           (sym == FcitxKey_semicolon || sym == FcitxKey_apostrophe)))) {
       const unsigned pageIndex =
           configuredSecond || sym == FcitxKey_semicolon ? 1 : 2;
-      if (list && pageIndex < unsigned(list->size()))
-        list->candidate(pageIndex).select(ic);
+      selectByKey(ic, pageIndex);
       e.filterAndAccept();
       return;
     }
@@ -1728,20 +1836,8 @@ public:
         (sym == FcitxKey_space || (sym >= FcitxKey_1 && sym <= FcitxKey_9))) {
       const unsigned pageIndex =
           sym == FcitxKey_space ? 0 : unsigned(sym - FcitxKey_1);
-      if (!list || pageIndex >= unsigned(list->size())) {
-        if (sym != FcitxKey_space)
-          return;
-      }
-      if (list && list->size()) {
-        const int index = sym == FcitxKey_space
-                              ? std::max(list->cursorIndex(), 0)
-                              : int(pageIndex);
-        if (index < list->size())
-          list->candidate(index).select(ic);
-      } else if (sym == FcitxKey_space) {
-        select(ic, 0);
-      }
-      e.filterAndAccept();
+      if (selectByKey(ic, sym == FcitxKey_space ? -1 : int(pageIndex)))
+        e.filterAndAccept();
       return;
     }
     if (composing && sym == FcitxKey_BackSpace) {
@@ -1776,15 +1872,17 @@ public:
     if (composing && (sym == FcitxKey_Escape || sym == FcitxKey_Return ||
                       sym == FcitxKey_KP_Enter)) {
       if (s->vMode && sym != FcitxKey_Escape && list && list->totalSize()) {
-        list->candidate(std::max(list->cursorIndex(), 0)).select(ic);
+        selectByKey(ic);
         e.filterAndAccept();
         return;
       }
       send(ic, sym == FcitxKey_Escape ? "reset" : "raw");
       s->vMode = false;
-      s->preedit.clear();
-      s->cursor = 0;
-      clearDisplayState(s);
+      if (sym == FcitxKey_Escape) {
+        s->preedit.clear();
+        s->cursor = 0;
+        clearDisplayState(s);
+      }
       ic->inputPanel().setCandidateList(nullptr);
       panel(ic, s);
       e.filterAndAccept();
@@ -1806,11 +1904,13 @@ public:
     if (!composing && digit && autoChangeActive) {
       if (s->symbolAutoState == 1 || s->symbolAutoState == 2) {
         const char replacement = s->symbolAutoState == 1 ? ':' : ',';
-        ic->deleteSurroundingText(-1, 1);
-        ic->commitString(std::string(1, replacement) + asciiChar);
-        s->symbolAutoState = 3;
-        e.filterAndAccept();
-        return;
+        if (previousSurroundingTextIs(ic, replacement == ':' ? "：" : "，")) {
+          ic->deleteSurroundingText(-1, 1);
+          ic->commitString(std::string(1, replacement) + asciiChar);
+          s->symbolAutoState = 3;
+          e.filterAndAccept();
+          return;
+        }
       }
       s->symbolAutoState = 3;
     } else if (!composing && (!entry || !autoChangeActive)) {
@@ -1825,11 +1925,6 @@ public:
         (upper || digit || sym == FcitxKey_space)) {
       const uint32_t full = sym == FcitxKey_space ? 0x3000 : sym + 0xfee0;
       ic->commitString(utf8::UCS4ToUTF8(full));
-      e.filterAndAccept();
-      return;
-    }
-    if (!composing && upper) {
-      ic->commitString(std::string(1, asciiChar));
       e.filterAndAccept();
       return;
     }
@@ -1861,20 +1956,14 @@ public:
       e.filterAndAccept();
       return;
     }
-    if (composing && upper) {
-      send(ic, "punctuation", std::string(1, asciiChar), 0, -1, -1,
-           std::string(1, asciiChar));
-      e.filterAndAccept();
-      return;
-    }
-    if (lower || separator) {
+    if (lower || upper || separator) {
       s->symbolAutoState = 0;
       std::string text(1, asciiChar);
       s->cursor = std::min(s->cursor, s->preedit.size());
       s->preedit.insert(s->cursor, text);
       ++s->cursor;
       clearDisplayState(s);
-      if (lower && networkEnabled_)
+      if ((lower || upper) && networkEnabled_)
         s->cloudPollUntil = now(CLOCK_MONOTONIC) + 1500000;
       send(ic, "key", text);
       panel(ic, s);

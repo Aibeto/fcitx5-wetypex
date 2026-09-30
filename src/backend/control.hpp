@@ -1,10 +1,21 @@
 // A same-user management channel. It shares the serialized engine thread with
 // keyboard input, so settings never race the original dictionary
 // implementation.
+#pragma once
+#include <algorithm>
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
+#include <ctime>
 #include <deque>
+#include <map>
 #include <poll.h>
+#include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <unistd.h>
+#include <vector>
 class ServiceTransport {
   struct Peer {
     std::string input, output;
@@ -19,14 +30,20 @@ class ServiceTransport {
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec;
   }
-  void collect(int fd, std::string &buffer) {
+  void dropPeer(int fd) {
+    close(fd);
+    peers_.erase(fd);
+    std::erase_if(ready_, [fd](const auto &item) { return item.first == fd; });
+  }
+  bool collect(int fd, std::string &buffer) {
     size_t end;
     while ((end = buffer.find('\n')) != std::string::npos) {
       if (ready_.size() >= 128)
-        _exit(90);
+        return false;
       ready_.emplace_back(fd, buffer.substr(0, end));
       buffer.erase(0, end + 1);
     }
+    return true;
   }
 
 public:
@@ -98,8 +115,11 @@ public:
               if (f.fd == 0)
                 return false;
               dead = true;
-            } else
-              collect(f.fd, buffer);
+            } else if (!collect(f.fd, buffer)) {
+              if (f.fd == 0)
+                return false;
+              dead = true;
+            }
             if (f.fd != 0)
               peers_.at(f.fd).active = tick();
           } else if (n == 0 || (errno != EINTR && errno != EAGAIN))
@@ -124,8 +144,7 @@ public:
         if (dead) {
           if (f.fd == 0)
             return false;
-          close(f.fd);
-          peers_.erase(f.fd);
+          dropPeer(f.fd);
         }
       }
     }
@@ -145,8 +164,7 @@ public:
     if (it == peers_.end())
       return;
     if (it->second.output.size() + line.size() > 4194304) {
-      close(source);
-      peers_.erase(it);
+      dropPeer(source);
       return;
     }
     it->second.output += line + '\n';

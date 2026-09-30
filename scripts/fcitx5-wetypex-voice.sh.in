@@ -34,7 +34,7 @@ case "${1:-}" in
   stop)
     test -f "$control" || exit 0
     recorder="$(sed -n '1p' "$control")"
-    case "$recorder" in *[!0-9]*|'') exit 1;; esac
+    case "$recorder" in *[!0-9]*|''|0|1) exit 1;; esac
     kill -INT "$recorder" 2>/dev/null || true
     count=0
     while kill -0 "$recorder" 2>/dev/null && [ "$count" -lt 50 ]; do
@@ -68,7 +68,7 @@ case "${1:-}" in
     result="$state/voice/result.json"
     printf '%s\n' "$output" > "$result"
     chmod 600 "$result"
-    python3 - "$state/voice-inbox.json" "$result" <<'PY'
+    python3 - "$state/voice-inbox.json" "$result" "${2:-0}" "${3:-0}" <<'PY'
 import json, os, pathlib, sys, time
 data = json.load(open(sys.argv[2]))
 text = data.get("text", "") if data.get("ok") else ""
@@ -89,7 +89,9 @@ elif mode == "空格替换标点":
     text = re.sub(r"[，。！？；：、,.!?;:]+", " ", text)
 path = pathlib.Path(sys.argv[1])
 tmp = path.with_suffix(".tmp")
-tmp.write_text(json.dumps({"version": time.time_ns(), "text": text}, ensure_ascii=False) + "\n")
+tmp.write_text(json.dumps({"version": time.time_ns(), "text": text,
+                          "session": int(sys.argv[3]), "epoch": int(sys.argv[4])},
+                         ensure_ascii=False) + "\n")
 os.chmod(tmp, 0o600)
 tmp.replace(path)
 PY

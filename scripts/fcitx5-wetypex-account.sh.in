@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 command_name="${1:-}"
 case "$command_name" in
@@ -126,6 +127,10 @@ test -f "$runtime/manifest.txt" || {
 }
 mkdir -p "$state/business"
 chmod 700 "$state" "$state/business"
+# Hold the lock across payload staging, service execution and cleanup.
+# Concurrent uploads must never share a staging file outside this lock.
+exec 9>"$state/account.lock"
+flock -w 20 -E 73 9
 if [ "$command_name" = send-image ]; then
   cp "$image_source" "$state/business/clipboard-upload.bin"
   chmod 600 "$state/business/clipboard-upload.bin"
@@ -148,8 +153,7 @@ run_original() {
   # Pairing, settings and background sync share the same original account
   # database. Wait for the current short operation instead of surfacing an
   # intermittent failure when two callers overlap.
-  flock -w 20 -E 73 "$state/account.lock" \
-    bwrap --unshare-pid --die-with-parent \
+  bwrap --unshare-pid --die-with-parent \
       --ro-bind /usr /usr --symlink usr/lib /lib --ro-bind /lib64 /lib64 \
       --symlink usr/bin /bin --proc /proc --dev /dev --tmpfs /tmp \
       --dir /etc --ro-bind /etc/resolv.conf /etc/resolv.conf \

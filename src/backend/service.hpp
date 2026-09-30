@@ -49,10 +49,26 @@ struct ServiceSession {
   size_t displayCursor = 0;
   std::vector<size_t> cursorStops;
   unsigned pending = 0;
+  bool vMode = false;
   std::mutex mutex;
   std::vector<ServiceCandidate> candidates;
+  struct PublishedCandidates {
+    uint64_t revision;
+    std::vector<ServiceCandidate> candidates;
+  };
+  std::deque<PublishedCandidates> published;
   std::vector<std::string> commits;
 };
+// Caller holds the session mutex. Retain the exact candidate IDs sent to the
+// client so a cloud refresh cannot change the meaning of a displayed rank.
+static void publish_service_candidates(ServiceSession &s) {
+  if (s.published.empty() || s.published.back().revision != s.revision)
+    s.published.push_back({s.revision, s.candidates});
+  else
+    s.published.back().candidates = s.candidates;
+  while (s.published.size() > 4)
+    s.published.pop_front();
+}
 static void append_pending_scalar(std::string &output, unsigned char value) {
   if (value)
     output.push_back(char(value));
@@ -118,6 +134,7 @@ static void service_listener(uint64_t, int32_t *types, void **payloads,
       auto it = *(void **)payloads[i];
       auto cloud = *((void **)payloads[i] + 2);
       read_service_candidates(it, s.candidates);
+      ++s.revision;
       if (it)
         ((void (*)(void *))syms.at("_wxime_delete_candidate_iterator"))(it);
       if (cloud && cloud != it)
@@ -127,6 +144,7 @@ static void service_listener(uint64_t, int32_t *types, void **payloads,
       // The iterator is already the original engine's fully merged list.
       auto it = *(void **)payloads[i];
       read_service_candidates(it, s.candidates);
+      ++s.revision;
       if (it)
         ((void (*)(void *))syms.at("_wxime_delete_candidate_iterator"))(it);
     } else if (types[i] == 2) {
@@ -193,13 +211,25 @@ static void service_listener(uint64_t, int32_t *types, void **payloads,
     }
   }
 }
-static void service_select(ServiceSession &s, unsigned rank) {
+static bool service_select(ServiceSession &s, unsigned rank,
+                           int64_t expected = -1) {
   ServiceCandidate c;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (rank >= s.candidates.size())
-      return;
-    c = s.candidates[rank];
+    const std::vector<ServiceCandidate> *candidates = &s.candidates;
+    if (expected >= 0) {
+      const auto snapshot = std::find_if(
+          s.published.begin(), s.published.end(), [expected](const auto &item) {
+            return item.revision == uint64_t(expected);
+          });
+      if (snapshot == s.published.end())
+        return false;
+      candidates = &snapshot->candidates;
+    }
+    if (rank >= candidates->size())
+      return false;
+    c = (*candidates)[rank];
+    s.published.clear();
   }
   using Fn = void (*)(uint64_t, const char *, uint32_t, const void *, uint32_t,
                       const char *, uint32_t, const void *, uint32_t,
@@ -224,6 +254,7 @@ static void service_select(ServiceSession &s, unsigned rank) {
       s.cursorStops.clear();
     }
   }
+  return true;
 }
 static void service_loop() {
   std::map<uint64_t, std::unique_ptr<ServiceSession>> sessions;
@@ -258,7 +289,7 @@ static void service_loop() {
     wire::put(response.get(), "epoch", epoch);
     if (op == "quit")
       break;
-    if (client <= 0 || seq < 0 || sessions.size() > 64) {
+    if (client <= 0 || seq < 0) {
       wire::put(response.get(), "error", std::string("invalid session"));
     } else if (op == "hotword_list" || op == "hotword_set") {
       if (op == "hotword_set") {
@@ -297,6 +328,11 @@ static void service_loop() {
       }
     } else {
       if (!sessions.count(client)) {
+        if (sessions.size() >= 64) {
+          wire::put(response.get(), "error", std::string("session limit"));
+          transport.reply(source, wire::dump(response.get()));
+          continue;
+        }
         auto state = std::make_unique<ServiceSession>();
         alignas(16) unsigned char config[2048]{};
         config[1] = 1;
@@ -366,6 +402,16 @@ static void service_loop() {
         sessions[client] = std::move(state);
       }
       auto &s = *sessions.at(client);
+      if (op == "select" && wire::number(request.get(), "revision", -1) < 0 &&
+          wire::number(request.get(), "index") == 0) {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.candidates.empty())
+          op = "raw";
+      }
+      if (op != "poll" && op != "open" && op != "select") {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        s.published.clear();
+      }
       std::string cursorCommit;
       int64_t cursorCommitPosition = -1;
       if (op == "predict") {
@@ -384,6 +430,7 @@ static void service_loop() {
         }
       } else if (op == "vmode") {
         const bool enabled = wire::number(request.get(), "enabled", 1);
+        s.vMode = enabled;
         ((void (*)(uint64_t, uint32_t, bool))syms.at(
             "_wxime_session_set_bool_option"))(s.engine, 0x11, enabled);
         if (!enabled)
@@ -490,15 +537,14 @@ static void service_loop() {
         }
       } else if (op == "select") {
         auto expected = wire::number(request.get(), "revision", -1);
-        if (expected >= 0 && (uint64_t)expected != s.revision)
+        if (!service_select(s, wire::number(request.get(), "index"), expected))
           wire::put(response.get(), "error", std::string("stale candidate"));
-        else
-          service_select(s, wire::number(request.get(), "index"));
       } else if (op == "reset" || op == "raw") {
         auto raw = s.selected + s.preedit;
         ((void (*)(uint64_t))syms.at("_wxime_reset_session"))(s.engine);
         std::lock_guard<std::mutex> lock(s.mutex);
         s.pending = 0;
+        s.vMode = false;
         s.preedit.clear();
         s.selected.clear();
         s.cursor = 0;
@@ -524,8 +570,14 @@ static void service_loop() {
           s.displayCursor = 0;
           s.cursorStops.clear();
         }
-        s.revision = seq;
-        wire::put(response.get(), "revision", seq);
+        if (!s.vMode && s.preedit.empty() && s.selected.empty() &&
+            op != "predict" && !s.candidates.empty()) {
+          s.candidates.clear();
+          s.published.clear();
+          ++s.revision;
+        }
+        publish_service_candidates(s);
+        wire::put(response.get(), "revision", int64_t(s.revision));
         wire::put(response.get(), "preedit", s.selected + s.preedit);
         wire::put(response.get(), "cursor",
                   int64_t(s.selected.size() + s.cursor));

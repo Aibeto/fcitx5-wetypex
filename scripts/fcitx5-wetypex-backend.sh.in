@@ -9,6 +9,8 @@ support="${WETYPE_SUPPORT_DIR:-@WETYPE_SUPPORT_DIR@}"
 test -f "$runtime/manifest.txt" || { echo 'Run fcitx5-wetypex-setup first.' >&2; exit 78; }
 mkdir -p "$state/user"
 chmod 700 "$state"
+exec 9>"$state/backend.lock"
+flock -w 5 -E 73 9
 python3 - "$state/user/persistent_data" "$state/user/network" <<'PY'
 import pathlib, shutil, sys
 for value in sys.argv[1:]:
@@ -39,7 +41,7 @@ if [ "$standalone" = 0 ] && [ -f "$account/identity.json" ]; then
   fi
   test -n "$model" || model=LINUX
   if [ -n "$uin" ] && [ -n "$device_code" ]; then
-    exec flock -w 5 -E 73 "$state/backend.lock" bwrap --unshare-pid --die-with-parent \
+    bwrap --unshare-pid --die-with-parent \
       --ro-bind /usr /usr --symlink usr/lib /lib --ro-bind /lib64 /lib64 --symlink usr/bin /bin \
       --proc /proc --dev /dev --tmpfs /tmp --dir /etc \
       --ro-bind /etc/resolv.conf /etc/resolv.conf --ro-bind /etc/hosts /etc/hosts \
@@ -53,11 +55,12 @@ if [ "$standalone" = 0 ] && [ -f "$account/identity.json" ]; then
       --setenv WETYPE_GROUP_ID "$group_id" --setenv WETYPE_GROUP_FUNCTIONS "$group_functions" \
       --setenv WETYPE_HOTWORD_VERSION "$hotword_version" \
       /support/wetypex-engine-host /input serve
+    exit 0
   fi
 fi
 
 # Offline and standalone sessions retain a private network namespace.
-exec flock -w 5 -E 73 "$state/backend.lock" bwrap --unshare-net --unshare-pid --die-with-parent \
+bwrap --unshare-net --unshare-pid --die-with-parent \
   --ro-bind /usr /usr --symlink usr/lib /lib --ro-bind /lib64 /lib64 --symlink usr/bin /bin \
   --proc /proc --dev /dev --tmpfs /tmp \
   --ro-bind "$runtime" /input --ro-bind "$support" /support --bind "$state" /work \

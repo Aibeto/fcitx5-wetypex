@@ -1,3 +1,4 @@
+#include "../common/qt_helpers.hpp"
 #include <QAbstractSocket>
 #include <QApplication>
 #include <QDir>
@@ -786,17 +787,17 @@ private:
       return;
     accountBusy_ = true;
     auto *process = new QProcess(this);
-    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-            this,
-            [this, process,
-             callback = std::move(callback)](int, QProcess::ExitStatus) {
-              accountBusy_ = false;
-              const QJsonObject result =
-                  QJsonDocument::fromJson(process->readAllStandardOutput())
-                      .object();
-              process->deleteLater();
-              callback(result);
-            });
+    wetype::onProcessDone(
+        process, this,
+        [this, process, callback = std::move(callback)](int,
+                                                        QProcess::ExitStatus) {
+          accountBusy_ = false;
+          const QJsonObject result =
+              QJsonDocument::fromJson(process->readAllStandardOutput())
+                  .object();
+          process->deleteLater();
+          callback(result);
+        });
     process->start(qEnvironmentVariable("WETYPE_ACCOUNT_TOOL",
                                         QStringLiteral(WETYPE_ACCOUNT_TOOL)),
                    arguments);

@@ -87,8 +87,8 @@ void erase(const std::shared_ptr<Connection> &connection) {
 }
 void run(const std::shared_ptr<Connection> &connection) {
   curl_global_init(CURL_GLOBAL_DEFAULT);
-  connection->curl = curl_easy_init();
-  if (!connection->curl) {
+  CURL *curl = curl_easy_init();
+  if (!curl) {
     onOpen(connection, false, CURLE_FAILED_INIT, "curl initialization failed");
     erase(connection);
     return;
@@ -108,61 +108,99 @@ void run(const std::shared_ptr<Connection> &connection) {
     headers = curl_slist_append(headers,
                                 ("Sec-WebSocket-Protocol: " + value).c_str());
   }
-  curl_easy_setopt(connection->curl, CURLOPT_URL, connection->url.c_str());
-  curl_easy_setopt(connection->curl, CURLOPT_HTTPHEADER, headers);
-  curl_easy_setopt(connection->curl, CURLOPT_CONNECT_ONLY, 2L);
-  curl_easy_setopt(connection->curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(connection->curl, CURLOPT_SSL_VERIFYHOST, 2L);
-  curl_easy_setopt(connection->curl, CURLOPT_CONNECTTIMEOUT_MS, 8000L);
-  curl_easy_setopt(connection->curl, CURLOPT_TIMEOUT_MS, 12000L);
-  curl_easy_setopt(connection->curl, CURLOPT_NOSIGNAL, 1L);
-  CURLcode result = curl_easy_perform(connection->curl);
+  curl_easy_setopt(curl, CURLOPT_URL, connection->url.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 8000L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 12000L);
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  CURLcode result = curl_easy_perform(curl);
   if (result != CURLE_OK) {
     onOpen(connection, false, result, curl_easy_strerror(result));
     curl_slist_free_all(headers);
-    curl_easy_cleanup(connection->curl);
-    connection->curl = nullptr;
+    curl_easy_cleanup(curl);
     erase(connection);
     return;
   }
+  {
+    std::lock_guard lock(connection->curlMutex);
+    connection->curl = curl;
+  }
   onOpen(connection, true, 0, {});
   std::vector<unsigned char> message;
+  std::vector<unsigned char> closeMessage;
   bool binary = false;
   while (connection->running) {
     unsigned char buffer[16384];
     size_t received = 0;
     const curl_ws_frame *frame = nullptr;
+    curl_ws_frame metadata{};
     {
       std::lock_guard lock(connection->curlMutex);
-      result = curl_ws_recv(connection->curl, buffer, sizeof(buffer), &received,
-                            &frame);
+      result = curl_ws_recv(curl, buffer, sizeof(buffer), &received, &frame);
+      // libcurl invalidates this pointer at the next WebSocket call,
+      // including a concurrent send. Copy it before releasing the lock.
+      if (result == CURLE_OK && frame)
+        metadata = *frame;
     }
     if (result == CURLE_AGAIN) {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
       continue;
     }
     if (result != CURLE_OK) {
+      std::lock_guard lock(connection->curlMutex);
       connection->closeCode = result;
       connection->reason = curl_easy_strerror(result);
       break;
     }
     if (!frame)
       continue;
+    if (metadata.flags & (CURLWS_PING | CURLWS_PONG))
+      continue;
+    if (metadata.flags & CURLWS_CLOSE) {
+      closeMessage.insert(closeMessage.end(), buffer, buffer + received);
+      if (metadata.bytesleft != 0)
+        continue;
+      std::lock_guard lock(connection->curlMutex);
+      connection->closeCode =
+          closeMessage.size() >= 2
+              ? (int(closeMessage[0]) << 8) | closeMessage[1]
+              : 1005;
+      connection->reason =
+          closeMessage.size() > 2
+              ? std::string(closeMessage.begin() + 2, closeMessage.end())
+              : std::string();
+      break;
+    }
+    if (!(metadata.flags & (CURLWS_TEXT | CURLWS_BINARY | CURLWS_CONT)))
+      continue;
     if (message.empty())
-      binary = (frame->flags & CURLWS_BINARY) != 0;
+      binary = (metadata.flags & CURLWS_BINARY) != 0;
+    if (message.size() + received > 16777216) {
+      std::lock_guard lock(connection->curlMutex);
+      connection->closeCode = 1009;
+      connection->reason = "WebSocket message too large";
+      break;
+    }
     message.insert(message.end(), buffer, buffer + received);
-    if (frame->bytesleft == 0 && !(frame->flags & CURLWS_CONT)) {
+    if (metadata.bytesleft == 0 && !(metadata.flags & CURLWS_CONT)) {
       onMessage(connection, message, binary);
       message.clear();
     }
   }
   curl_slist_free_all(headers);
+  int closeCode;
+  std::string reason;
   {
     std::lock_guard lock(connection->curlMutex);
-    curl_easy_cleanup(connection->curl);
+    curl_easy_cleanup(curl);
     connection->curl = nullptr;
+    closeCode = connection->closeCode;
+    reason = connection->reason;
   }
-  onClose(connection, connection->closeCode, connection->reason);
+  onClose(connection, closeCode, reason);
   erase(connection);
 }
 } // namespace
@@ -216,25 +254,54 @@ extern "C" int wcwss_send_socket_message(const std::string &client,
       return 100003;
     connection = iterator->second;
   }
-  if (!data || !size || !connection->curl)
+  if (!data || !size)
     return 100002;
-  ++bridgeSends;
-  size_t sent = 0;
   std::lock_guard lock(connection->curlMutex);
-  auto result = curl_ws_send(connection->curl, data, size, &sent, 0,
-                             binary ? CURLWS_BINARY : CURLWS_TEXT);
-  return result == CURLE_OK && sent == size ? 0 : static_cast<int>(result);
+  if (!connection->curl || !connection->running)
+    return 100002;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  auto failed = [&](CURLcode error) {
+    // A failed partial frame cannot be reused for a different message.
+    connection->closeCode = error;
+    connection->reason = curl_easy_strerror(error);
+    connection->running = false;
+    return static_cast<int>(error);
+  };
+  size_t offset = 0;
+  while (offset < size) {
+    size_t sent = 0;
+    auto result = curl_ws_send(connection->curl, data + offset, size - offset,
+                               &sent, 0, binary ? CURLWS_BINARY : CURLWS_TEXT);
+    offset += sent;
+    if (result != CURLE_OK && result != CURLE_AGAIN)
+      return failed(result);
+    if (offset == size) {
+      ++bridgeSends;
+      return 0;
+    }
+    if (std::chrono::steady_clock::now() >= deadline)
+      return failed(CURLE_OPERATION_TIMEDOUT);
+    if (result == CURLE_AGAIN || !sent)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return CURLE_SEND_ERROR;
 }
 
 extern "C" int wcwss_close_socket(const std::string &client, uint32_t socketId,
                                   int code, const std::string &reason) {
-  std::lock_guard lock(connectionsMutex);
-  auto iterator = connections.find({client, socketId});
-  if (iterator == connections.end())
-    return 100003;
-  iterator->second->closeCode = code;
-  iterator->second->reason = reason;
-  iterator->second->running = false;
+  std::shared_ptr<Connection> connection;
+  {
+    std::lock_guard lock(connectionsMutex);
+    auto iterator = connections.find({client, socketId});
+    if (iterator == connections.end())
+      return 100003;
+    connection = iterator->second;
+  }
+  std::lock_guard lock(connection->curlMutex);
+  connection->closeCode = code;
+  connection->reason = reason;
+  connection->running = false;
   return 0;
 }
 

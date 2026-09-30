@@ -22,5 +22,9 @@ jobs:
         run: cmake --build build --parallel
       - name: 检查脚本
         run: |
-          sh -n scripts/*.in
-          python3 -m py_compile scripts/setup_runtime.py tools/*.py
+          for script in scripts/*.sh.in; do
+            case "$script" in *-syncd.sh.in|*-update.sh.in) continue;; esac
+            sh -n "$script"
+          done
+          python3 -m py_compile scripts/setup_runtime.py tools/*.py \
+            build/fcitx5-wetypex-syncd build/fcitx5-wetypex-update

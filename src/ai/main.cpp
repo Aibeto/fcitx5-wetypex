@@ -1,3 +1,4 @@
+#include "../common/qt_helpers.hpp"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -235,18 +236,18 @@ private:
         QStringLiteral("/ai-response.html");
     QDir().mkpath(QFileInfo(output).absolutePath());
     auto *process = new QProcess(this);
-    connect(process,
-            qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-            [this, process, output](int code, QProcess::ExitStatus status) {
-              input_->setEnabled(true);
-              polish_->setEnabled(true);
-              if (status == QProcess::NormalExit && code == 0) {
-                loadResponse(output, currentQuery_);
-                input_->clear();
-              }
-              send_->setEnabled(!input_->text().trimmed().isEmpty());
-              process->deleteLater();
-            });
+    wetype::onProcessDone(
+        process, this,
+        [this, process, output](int code, QProcess::ExitStatus status) {
+          input_->setEnabled(true);
+          polish_->setEnabled(true);
+          if (status == QProcess::NormalExit && code == 0) {
+            loadResponse(output, currentQuery_);
+            input_->clear();
+          }
+          send_->setEnabled(!input_->text().trimmed().isEmpty());
+          process->deleteLater();
+        });
     process->start(QStringLiteral(WETYPE_AI_HELPER),
                    {QStringLiteral("--fetch"), output, question});
   }

@@ -1,3 +1,4 @@
+#include "../common/qt_helpers.hpp"
 #include "original_windows.hpp"
 
 #include <QApplication>
@@ -62,8 +63,8 @@ static void runAccount(QWidget *owner, const QStringList &arguments,
   process->setProgram(
       qEnvironmentVariable("WETYPE_ACCOUNT_TOOL", WETYPE_ACCOUNT_TOOL));
   process->setArguments(arguments);
-  QObject::connect(
-      process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), owner,
+  wetype::onProcessDone(
+      process, owner,
       [process, done = std::move(done)](int code, QProcess::ExitStatus) {
         auto result =
             QJsonDocument::fromJson(process->readAllStandardOutput()).object();
@@ -164,17 +165,7 @@ static QJsonObject engineControl(const QJsonObject &request,
       *error = object.value("error").toString();
     return object;
   }
-  socket.write(QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n');
-  if (!socket.waitForBytesWritten(1500) || !socket.waitForReadyRead(3000)) {
-    if (error)
-      *error = "输入核心没有响应";
-    return {};
-  }
-  QByteArray response;
-  while (!response.contains('\n') && socket.waitForReadyRead(200))
-    response += socket.readAll();
-  response += socket.readAll();
-  const auto object = QJsonDocument::fromJson(response.trimmed()).object();
+  const auto object = wetype::localRequest(socket, request, 3000);
   if (object.contains("error") && error)
     *error = object.value("error").toString();
   return object;
@@ -465,6 +456,11 @@ public:
     QObject::connect(
         &process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
         this, [this](int code, QProcess::ExitStatus) { finish(code); });
+    QObject::connect(&process_, &QProcess::errorOccurred, this,
+                     [this](QProcess::ProcessError error) {
+                       if (error == QProcess::FailedToStart)
+                         showFailure("账户服务无法启动，请检查安装后重试");
+                     });
     QObject::connect(&poll_, &QTimer::timeout, this, [this] {
       poll_.stop();
       stage_ = Stage::Status;
@@ -601,9 +597,11 @@ static void runToggleDialog(QWidget *owner, const QString &title,
   const auto current = readSettings();
   QList<QWidget *> rows;
   for (const auto &[name, key, defaultValue] : options)
-    rows.append(row(name, {},
-                    toggle(current.value(key).toBool(defaultValue), true, key),
-                    48));
+    rows.append(
+        row(name, {},
+            toggle(wetype::settingBool(current.value(key), defaultValue), true,
+                   key),
+            48));
   bodyLayout->addWidget(rowsCard(rows));
   bodyLayout->addStretch();
   scroll->setWidget(body);
@@ -808,11 +806,11 @@ int main(int argc, char **argv) {
                      {"大表情", "large_emoji", true},
                      {"符号表情", "symbol_emoji", true}});
   });
-  input.body->addWidget(
-      rowsCard({row("智能拼写", "精准匹配候选词，大幅提升打字效率",
-                    toggle(settings.value("smart_input").toBool(true), true,
-                           "smart_input")),
-                row("表情和颜文字推荐", {}, emojiSetup, 50)}));
+  input.body->addWidget(rowsCard(
+      {row("智能拼写", "精准匹配候选词，大幅提升打字效率",
+           toggle(wetype::settingBool(settings.value("smart_input"), true),
+                  true, "smart_input")),
+       row("表情和颜文字推荐", {}, emojiSetup, 50)}));
   auto *languageSetup = new QPushButton("设置..."),
        *fuzzySetup = new QPushButton("设置...");
   QObject::connect(languageSetup, &QPushButton::clicked,
@@ -839,25 +837,27 @@ int main(int argc, char **argv) {
                      {"an/ai", "fuzzy_an_ai", false},
                      {"eng/ong", "fuzzy_eng_ong", false}});
   });
-  input.body->addWidget(
-      rowsCard({row("输入中文时，将「/?」按键替换为 、", {},
-                    toggle(settings.value("slash_punctuation").toBool(true),
-                           true, "slash_punctuation"),
-                    52),
-                row("符号自动转换",
-                    "数字间部分符号处理为英文标点，例如 12：00 替换为 12:00",
-                    toggle(settings.value("symbol_auto_change").toBool(true),
-                           true, "symbol_auto_change")),
-                row("符号自动补全", "自动补全成对符号的右半部分",
-                    toggle(settings.value("symbol_auto_pair").toBool(true),
-                           true, "symbol_auto_pair")),
-                row("默认输入语言（中文/英文）", {}, languageSetup, 52),
-                row("模糊拼音", {}, fuzzySetup, 52)}));
+  input.body->addWidget(rowsCard(
+      {row("输入中文时，将「/?」按键替换为 、", {},
+           toggle(
+               wetype::settingBool(settings.value("slash_punctuation"), true),
+               true, "slash_punctuation"),
+           52),
+       row("符号自动转换",
+           "数字间部分符号处理为英文标点，例如 12：00 替换为 12:00",
+           toggle(
+               wetype::settingBool(settings.value("symbol_auto_change"), true),
+               true, "symbol_auto_change")),
+       row("符号自动补全", "自动补全成对符号的右半部分",
+           toggle(wetype::settingBool(settings.value("symbol_auto_pair"), true),
+                  true, "symbol_auto_pair")),
+       row("默认输入语言（中文/英文）", {}, languageSetup, 52),
+       row("模糊拼音", {}, fuzzySetup, 52)}));
   input.body->addWidget(rowsCard(
       {row("单机模式",
            "无需网络，单机离线使用。不支持跨设备、表情推荐、问 AI 等联网功能",
-           toggle(settings.value("standalone").toBool(false), true,
-                  "standalone"))}));
+           toggle(wetype::settingBool(settings.value("standalone"), false),
+                  true, "standalone"))}));
   pages->addWidget(input.widget);
 
   auto voice = page("语音输入");
@@ -885,15 +885,17 @@ int main(int argc, char **argv) {
   voice.body->addWidget(voiceHero);
   voice.body->addWidget(rowsCard(
       {row("快捷键", {}, nullptr, 44),
-       shortcutRow("启动语音输入",
-                   settings.value("voice_launch_shortcut").toBool(true),
-                   {"Ctrl", "Win", "Shift", "×"},
-                   "按下可开启语音输入，按任意键均可结束", true,
-                   "voice_launch_shortcut"),
-       shortcutRow("按住说话",
-                   settings.value("voice_hold_shortcut").toBool(true),
-                   {"Ctrl", "Win", "×"}, "按住可语音输入，松手结束", true,
-                   "voice_hold_shortcut")}));
+       shortcutRow(
+           "启动语音输入",
+           wetype::settingBool(settings.value("voice_launch_shortcut"), true),
+           {"Ctrl", "Win", "Shift", "×"},
+           "按下可开启语音输入，按任意键均可结束", true,
+           "voice_launch_shortcut"),
+       shortcutRow(
+           "按住说话",
+           wetype::settingBool(settings.value("voice_hold_shortcut"), true),
+           {"Ctrl", "Win", "×"}, "按住可语音输入，松手结束", true,
+           "voice_hold_shortcut")}));
   auto *microphone = new QComboBox;
   microphone->addItem("自动检测");
   QProcess pipewire;
@@ -940,7 +942,8 @@ int main(int argc, char **argv) {
       rowsCard({row("麦克风", "设置语音输入的默认麦克风", microphone),
                 row("标点设置", {}, punctuationMode),
                 row("语音智能整理", {},
-                    toggle(settings.value("voice_smart_polish").toBool(true),
+                    toggle(wetype::settingBool(
+                               settings.value("voice_smart_polish"), true),
                            true, "voice_smart_polish"),
                     52)}));
   pages->addWidget(voice.widget);
@@ -1048,10 +1051,10 @@ int main(int argc, char **argv) {
   auto *clipboard = new QWidget;
   auto *clipboardLayout = new QVBoxLayout(clipboard);
   clipboardLayout->setContentsMargins(0, 0, 0, 0);
-  clipboardLayout->addWidget(
-      rowsCard({row("剪贴板", "复制的内容将在剪贴板中展示",
-                    toggle(settings.value("clipboard_enabled").toBool(false),
-                           true, "clipboard_enabled"))}));
+  clipboardLayout->addWidget(rowsCard({row(
+      "剪贴板", "复制的内容将在剪贴板中展示",
+      toggle(wetype::settingBool(settings.value("clipboard_enabled"), false),
+             true, "clipboard_enabled"))}));
   clipboardLayout->addStretch();
   phraseStack->addWidget(clipboard);
   phrases.body->addWidget(phraseStack, 1);
@@ -1110,9 +1113,11 @@ int main(int argc, char **argv) {
   auto shortcuts = page("快捷键");
   shortcuts.body->addWidget(rowsCard(
       {row("中英文切换", {}, nullptr, 44),
-       shortcutRow("使用 shift", settings.value("shift_switch").toBool(true),
+       shortcutRow("使用 shift",
+                   wetype::settingBool(settings.value("shift_switch"), true),
                    {"shift"}, {}, true, "shift_switch"),
-       shortcutRow("使用 ctrl", settings.value("ctrl_switch").toBool(false),
+       shortcutRow("使用 ctrl",
+                   wetype::settingBool(settings.value("ctrl_switch"), false),
                    {"ctrl"}, {}, true, "ctrl_switch")}));
   auto *defaultShortcut =
       new QLabel("系统默认支持“ctrl + 空格”切换中英文  修改");
@@ -1120,54 +1125,65 @@ int main(int argc, char **argv) {
   shortcuts.body->addWidget(defaultShortcut);
   shortcuts.body->addWidget(rowsCard(
       {row("快捷使用", {}, nullptr, 44),
-       shortcutRow("AI 助手  Beta", settings.value("ai_assistant").toBool(true),
+       shortcutRow("AI 助手  Beta",
+                   wetype::settingBool(settings.value("ai_assistant"), true),
                    {"="}, "输入后按「=」可使用 AI 提问、表情推荐等功能", true,
                    "ai_assistant"),
        shortcutRow(
-           "V 模式", settings.value("v_mode").toBool(true), {"V"},
+           "V 模式", wetype::settingBool(settings.value("v_mode"), true), {"V"},
            "按「v」打开快捷功能栏，可使用计算、剪贴板、常用语、符号等功能",
            true, "v_mode")}));
   shortcuts.body->addWidget(rowsCard(
       {row("语音输入", {}, nullptr, 44),
-       shortcutRow("启动语音输入",
-                   settings.value("voice_launch_shortcut").toBool(true),
-                   {"Ctrl", "Win", "Shift", "×"},
-                   "按下可开启语音输入，按任意键均可结束", true,
-                   "voice_launch_shortcut"),
-       shortcutRow("按住说话",
-                   settings.value("voice_hold_shortcut").toBool(true),
-                   {"Ctrl", "Win", "×"}, "按住可语音输入，松手结束", true,
-                   "voice_hold_shortcut")}));
+       shortcutRow(
+           "启动语音输入",
+           wetype::settingBool(settings.value("voice_launch_shortcut"), true),
+           {"Ctrl", "Win", "Shift", "×"},
+           "按下可开启语音输入，按任意键均可结束", true,
+           "voice_launch_shortcut"),
+       shortcutRow(
+           "按住说话",
+           wetype::settingBool(settings.value("voice_hold_shortcut"), true),
+           {"Ctrl", "Win", "×"}, "按住可语音输入，松手结束", true,
+           "voice_hold_shortcut")}));
   shortcuts.body->addWidget(rowsCard(
       {row("输入状态切换", {}, nullptr, 44),
-       shortcutRow("全半角输入切换",
-                   settings.value("half_full_switch").toBool(false),
-                   {"shift", "backslash-icon"}, {}, true, "half_full_switch"),
-       shortcutRow("中文下中英标点切换",
-                   settings.value("punctuation_switch").toBool(true),
-                   {"ctrl", "。"}, {}, true, "punctuation_switch"),
-       shortcutRow("简繁体输入切换",
-                   settings.value("traditional_switch").toBool(false),
-                   {"ctrl", "shift", "F"}, {}, true, "traditional_switch")}));
+       shortcutRow(
+           "全半角输入切换",
+           wetype::settingBool(settings.value("half_full_switch"), false),
+           {"shift", "backslash-icon"}, {}, true, "half_full_switch"),
+       shortcutRow(
+           "中文下中英标点切换",
+           wetype::settingBool(settings.value("punctuation_switch"), true),
+           {"ctrl", "。"}, {}, true, "punctuation_switch"),
+       shortcutRow(
+           "简繁体输入切换",
+           wetype::settingBool(settings.value("traditional_switch"), false),
+           {"ctrl", "shift", "F"}, {}, true, "traditional_switch")}));
   shortcuts.body->addWidget(rowsCard(
       {row("翻页按字", {}, new QLabel("向上翻　向下翻"), 44),
-       shortcutRow("减号等号", settings.value("page_minus_equal").toBool(true),
-                   {"−", "="}, {}, true, "page_minus_equal"),
-       shortcutRow("左右中括号", settings.value("page_brackets").toBool(true),
+       shortcutRow(
+           "减号等号",
+           wetype::settingBool(settings.value("page_minus_equal"), true),
+           {"−", "="}, {}, true, "page_minus_equal"),
+       shortcutRow("左右中括号",
+                   wetype::settingBool(settings.value("page_brackets"), true),
                    {"[", "]"}, {}, true, "page_brackets"),
-       shortcutRow("逗号句号",
-                   settings.value("page_comma_period").toBool(false),
-                   {"，", "。"}, {}, true, "page_comma_period"),
+       shortcutRow(
+           "逗号句号",
+           wetype::settingBool(settings.value("page_comma_period"), false),
+           {"，", "。"}, {}, true, "page_comma_period"),
        shortcutRow("shift + tab / tab",
-                   settings.value("page_shift_tab").toBool(false),
+                   wetype::settingBool(settings.value("page_shift_tab"), false),
                    {"shift + tab", "tab"}, {}, true, "page_shift_tab")}));
   shortcuts.body->addWidget(rowsCard(
       {row("候选词选择", {}, nullptr, 44),
-       shortcutRow("使用分号、引号选择第 2 位、第 3 位候选词",
-                   settings.value("select_semicolon_quote").toBool(false),
-                   {"；", "’"}, {}, true, "select_semicolon_quote"),
+       shortcutRow(
+           "使用分号、引号选择第 2 位、第 3 位候选词",
+           wetype::settingBool(settings.value("select_semicolon_quote"), false),
+           {"；", "’"}, {}, true, "select_semicolon_quote"),
        shortcutRow("使用左、右 ctrl 选择第 2 位、第 3 位候选词",
-                   settings.value("select_ctrl").toBool(false),
+                   wetype::settingBool(settings.value("select_ctrl"), false),
                    {"ctrl", "backslash-icon", "ctrl"}, {}, true,
                    "select_ctrl")}));
   pages->addWidget(shortcuts.widget);
@@ -1179,7 +1195,8 @@ int main(int argc, char **argv) {
   const qint64 syncGroup = syncState.value("group_id").toInteger();
   const int syncFunctions = syncState.value("func_switch").toInt();
   const bool syncAvailable =
-      syncGroup > 0 && !settings.value("standalone").toBool(false);
+      syncGroup > 0 &&
+      !wetype::settingBool(settings.value("standalone"), false);
   auto *deviceHero = new QWidget;
   auto *deviceHeroLayout = new QHBoxLayout(deviceHero);
   deviceHeroLayout->setContentsMargins(82, 0, 82, 0);
@@ -1204,7 +1221,8 @@ int main(int argc, char **argv) {
   deviceHero->setStyleSheet("font-size:20px;background:transparent;");
   devices.body->addWidget(deviceHero);
   auto *transfer = greenButton("传文件");
-  transfer->setEnabled(!settings.value("standalone").toBool(false));
+  transfer->setEnabled(
+      !wetype::settingBool(settings.value("standalone"), false));
   QObject::connect(transfer, &QPushButton::clicked, [] {
     QProcess::startDetached(QStringLiteral(WETYPE_TRANSFER), {});
   });
@@ -1254,7 +1272,8 @@ int main(int argc, char **argv) {
   devices.body->addWidget(deviceLabel);
   auto *matchCode = greenButton("查看匹配码"),
        *mobileDownload = greenButton("下载手机版");
-  matchCode->setEnabled(!settings.value("standalone").toBool(false));
+  matchCode->setEnabled(
+      !wetype::settingBool(settings.value("standalone"), false));
   QObject::connect(mobileDownload, &QPushButton::clicked, [] {
     QDesktopServices::openUrl(QUrl("https://z.weixin.qq.com/"));
   });
@@ -1288,7 +1307,8 @@ int main(int argc, char **argv) {
   associate->setIcon(QIcon(asset("icon_sync_device")));
   associate->setStyleSheet("color:#00bf83;border:1px solid "
                            "#e9e9e9;background:white;min-height:42px;");
-  associate->setEnabled(!settings.value("standalone").toBool(false));
+  associate->setEnabled(
+      !wetype::settingBool(settings.value("standalone"), false));
   auto showPairing = [&window] {
     if (window.findChild<QWidget *>("pairingOverlay"))
       return;
@@ -1348,12 +1368,12 @@ int main(int argc, char **argv) {
     QDesktopServices::openUrl(
         QUrl("https://github.com/panxuc/fcitx5-wetypex/issues"));
   });
-  about.body->addWidget(
-      rowsCard({row("有新版本时自动更新", {},
-                    toggle(settings.value("auto_update").toBool(true), true,
-                           "auto_update"),
-                    48),
-                row("我要反馈", {}, feedback, 48)}));
+  about.body->addWidget(rowsCard(
+      {row("有新版本时自动更新", {},
+           toggle(wetype::settingBool(settings.value("auto_update"), true),
+                  true, "auto_update"),
+           48),
+       row("我要反馈", {}, feedback, 48)}));
   about.body->addStretch();
   auto *copyright =
       new QLabel("WeTypeX 社区项目\n原版核心及相关商标归其权利人所有\n"
