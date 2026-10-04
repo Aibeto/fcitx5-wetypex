@@ -16,7 +16,11 @@
 packaging/build-packages.sh
 ```
 
-脚本通过统一的 `/usr` staging 目录生成便携 `tar.zst`，在 Debian Trixie 与 Fedora 43 容器中分别编译二进制，再使用 nFPM 生成 deb 与 rpm，最后调用 makepkg 生成 Arch 软件包。系统需要预先安装 Docker、`nfpm`、`makepkg`、zstd 和本机构建依赖。
+脚本通过统一的 `/usr` staging 目录生成便携 `tar.zst`，在 Ubuntu 24.04 LTS 与 Fedora 43 容器中分别编译二进制，再使用 nFPM 生成 deb 与 rpm，最后调用 makepkg 生成 Arch 软件包。系统需要预先安装 Docker、`nfpm`、`makepkg`、zstd 和本机构建依赖。
+
+deb 使用 Noble 的 Qt 6.4、Fcitx5 5.1.7 和 glibc 2.39 构建，兼容 Ubuntu 24.04+ 与 Debian 13。Fcitx5 输入插件和 Qt5/Qt6 配置插件采用 `FCITX_INSTALL_ADDONDIR`；私有引擎宿主继续位于 `/usr/lib/fcitx5-wetypex`。配置工具会在 `qt5` 或 `qt6` 子目录加载对应 ABI 的插件。
+
+网络桥接默认静态包含固定版本 libcurl，启用 WS/WSS、OpenSSL 和线程 DNS 解析，避免发行版关闭 WebSocket 功能导致运行时失败。curl 源码版本与 SHA-256 固定在 `cmake/BundledCurl.cmake` 和 Arch 构建文件中，更新时应同步维护。可用 `-DWETYPE_BUNDLED_CURL=OFF` 选择系统 libcurl 8.9+，还需确认其构建启用了 WS/WSS。
 
 也可以只生成源码包与 Arch 构建文件：
 
@@ -61,4 +65,4 @@ makepkg -C -f --noconfirm
 
 ## GitHub Release
 
-推送由 `CMakeLists.txt` 版本和软件包修订号组成的 `vX.Y.Z-N` 标签会触发发布工作流。工作流分别在 Arch Linux、Debian Trixie 和 Fedora 43 环境构建软件包，生成源码包、便携归档与 SHA-256 校验文件，并创建或更新同名 GitHub Release。标签与源码版本或修订号不一致时，工作流会直接失败。
+推送由 `CMakeLists.txt` 版本和软件包修订号组成的 `vX.Y.Z.B-N` 标签会触发发布工作流。工作流分别在 Arch Linux、Ubuntu 24.04 LTS 和 Fedora 43 环境构建软件包，生成源码包、便携归档与 SHA-256 校验文件，并创建或更新同名 GitHub Release。标签与源码版本或修订号不一致时，工作流会直接失败。

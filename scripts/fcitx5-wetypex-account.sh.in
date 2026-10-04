@@ -3,6 +3,14 @@ set -eu
 umask 077
 
 command_name="${1:-}"
+if [ "$command_name" = network-info ]; then
+  support="${WETYPE_SUPPORT_DIR:-@WETYPE_SUPPORT_DIR@}"
+  exec "$support/wetypex-engine-host" "$support" network-info
+fi
+if [ "$command_name" = sync-now ]; then
+  shift
+  exec @CMAKE_INSTALL_FULL_BINDIR@/fcitx5-wetypex-sync "$@"
+fi
 case "$command_name" in
   pairing-code)
     operation_name=WETYPE_PAIRING_CODE
@@ -38,12 +46,14 @@ case "$command_name" in
     operation_name=WETYPE_SET_FUNCTIONS
     operation_value="${3:-}"
     group_id="${2:-}"
-    case "$group_id:$operation_value" in
-      *[!0-9:]*|:*) echo "set-functions requires GROUP_ID and mask 0..7" >&2; exit 64 ;;
-    esac
-    test "$operation_value" -ge 0 -a "$operation_value" -le 7 || {
-      echo "set-functions mask must be 0..7" >&2; exit 64
-    }
+    case "$group_id" in *[!0-9]*|'') echo "set-functions requires a numeric GROUP_ID" >&2; exit 64;; esac
+    case "$operation_value" in *[!0-9]*|'') echo "set-functions requires a numeric function mask" >&2; exit 64;; esac
+    python3 - "$group_id" "$operation_value" <<'PY'
+import sys
+group, mask = map(int, sys.argv[1:])
+if not 0 < group < 2**64 or not 0 <= mask < 2**64:
+    raise SystemExit("set-functions values must fit the native unsigned 64-bit ABI")
+PY
     ;;
   send-clipboard)
     operation_name=WETYPE_SEND_CLIPBOARD
@@ -113,7 +123,7 @@ case "$command_name" in
     case "$operation_value" in *[!0-9]*|'') echo "unbind requires a device UIN" >&2; exit 64 ;; esac
     ;;
   *)
-    echo "usage: fcitx5-wetypex-account pairing-code | pairing-status CODE | confirm-bind BIND_ID | group-info [CURRENT_CLIPBOARD_VERSION] | set-functions GROUP_ID MASK | send-clipboard GROUP_ID TEXT | send-image GROUP_ID PNG_FILE | voice-file OPUS_FILE | p2p-code [TRANSFER_INFO_JSON] | p2p-peer CODE | p2p-init UIN [TRANSFER_INFO_JSON] | unbind UIN" >&2
+    echo "usage: fcitx5-wetypex-account network-info | sync-now | pairing-code | pairing-status CODE | confirm-bind BIND_ID | group-info [CURRENT_CLIPBOARD_VERSION] | set-functions GROUP_ID MASK | send-clipboard GROUP_ID TEXT | send-image GROUP_ID PNG_FILE | voice-file OPUS_FILE | p2p-code [TRANSFER_INFO_JSON] | p2p-peer CODE | p2p-init UIN [TRANSFER_INFO_JSON] | unbind UIN" >&2
     exit 64
     ;;
 esac
@@ -159,8 +169,8 @@ run_original() {
       --dir /etc --ro-bind /etc/resolv.conf /etc/resolv.conf \
       --ro-bind /etc/hosts /etc/hosts \
       --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf \
-      --ro-bind /etc/ssl /etc/ssl \
-      --ro-bind /etc/ca-certificates /etc/ca-certificates \
+      --ro-bind-try /etc/ssl /etc/ssl --ro-bind-try /etc/pki /etc/pki \
+      --ro-bind-try /etc/ca-certificates /etc/ca-certificates \
       --ro-bind "$runtime" /input --ro-bind "$support" /support \
       --bind "$state" /work --chdir /work --clearenv \
       --setenv PATH /usr/bin --setenv HOME /work \

@@ -20,11 +20,11 @@ C/C++ 使用 C++20、两空格缩进和现有命名风格。Python 与 Shell 应
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 for script in scripts/*.sh.in; do
-  case "$script" in *-syncd.sh.in|*-update.sh.in) continue;; esac
+  case "$script" in *-syncd.sh.in|*-update.sh.in|*-sync.sh.in) continue;; esac
   sh -n "$script"
 done
 python3 -m py_compile scripts/setup_runtime.py tools/*.py \
-  build/fcitx5-wetypex-syncd build/fcitx5-wetypex-update
+  build/fcitx5-wetypex-syncd build/fcitx5-wetypex-update build/fcitx5-wetypex-sync
 ```
 
 Pull Request 应描述最终行为、适用环境、实际执行过的检查以及仍存在的限制。

@@ -1,11 +1,13 @@
 // Linux transport for the original wetap network layer. This file must be
 // compiled with clang + libc++ because its boundary contains libc++ objects.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <curl/curl.h>
 #include <map>
 #include <memory>
@@ -42,6 +44,21 @@ std::atomic<uint32_t> nextId{1};
 std::atomic<unsigned> bridgeCalls{0};
 std::atomic<int> bridgeState{0}, bridgeError{-1};
 std::atomic<unsigned> bridgeSends{0}, bridgeReceives{0};
+std::once_flag curlInitialization;
+CURLcode curlInitializationResult = CURLE_FAILED_INIT;
+void initializeCurl() {
+  std::call_once(curlInitialization, [] {
+    curlInitializationResult = curl_global_init(CURL_GLOBAL_DEFAULT);
+  });
+}
+bool supportsProtocol(const char *name) {
+  initializeCurl();
+  const auto *version = curl_version_info(CURLVERSION_NOW);
+  for (auto protocol = version->protocols; protocol && *protocol; ++protocol)
+    if (!std::strcmp(*protocol, name))
+      return true;
+  return false;
+}
 
 template <class Function>
 Function callback(const std::shared_ptr<void> &owner, size_t index) {
@@ -86,7 +103,14 @@ void erase(const std::shared_ptr<Connection> &connection) {
   connections.erase({connection->client, connection->id});
 }
 void run(const std::shared_ptr<Connection> &connection) {
-  curl_global_init(CURL_GLOBAL_DEFAULT);
+  initializeCurl();
+  if (curlInitializationResult != CURLE_OK || !supportsProtocol("ws") ||
+      !supportsProtocol("wss")) {
+    onOpen(connection, false, CURLE_UNSUPPORTED_PROTOCOL,
+           "libcurl lacks WS/WSS support; use the bundled transport");
+    erase(connection);
+    return;
+  }
   CURL *curl = curl_easy_init();
   if (!curl) {
     onOpen(connection, false, CURLE_FAILED_INIT, "curl initialization failed");
@@ -111,12 +135,35 @@ void run(const std::shared_ptr<Connection> &connection) {
   curl_easy_setopt(curl, CURLOPT_URL, connection->url.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
+  curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+  curl_easy_setopt(curl, CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS, 200L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 8000L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 12000L);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  const auto started = std::chrono::steady_clock::now();
   CURLcode result = curl_easy_perform(curl);
+  const bool connectionFailure =
+      result == CURLE_COULDNT_CONNECT || result == CURLE_OPERATION_TIMEDOUT ||
+      result == CURLE_SSL_CONNECT_ERROR || result == CURLE_RECV_ERROR ||
+      result == CURLE_GOT_NOTHING;
+  const long remaining =
+      12000L - std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - started)
+                   .count();
+  // Happy Eyeballs races TCP connections. A selected IPv6 endpoint can still
+  // fail during TLS or upgrade, so retry A records within the same deadline.
+  if (connectionFailure && connection->running && remaining > 0) {
+    if (getenv("WETYPE_DEBUG_NETWORK"))
+      fprintf(stderr, "WSS_BRIDGE retry=ipv4 first_error=%d\n", int(result));
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                     std::min(8000L, remaining));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, remaining);
+    result = curl_easy_perform(curl);
+  }
   if (result != CURLE_OK) {
     onOpen(connection, false, result, curl_easy_strerror(result));
     curl_slist_free_all(headers);
@@ -313,6 +360,24 @@ extern "C" void wcwss_uninit(const std::string &client) {
 }
 
 extern "C" unsigned wcwss_bridge_calls() { return bridgeCalls.load(); }
+extern "C" const char *wcwss_bridge_curl_version() {
+  initializeCurl();
+  return curl_version_info(CURLVERSION_NOW)->version;
+}
+extern "C" const char *wcwss_bridge_curl_provider() {
+#ifdef WETYPE_BUNDLED_CURL
+  return "bundled-static";
+#else
+  return "system";
+#endif
+}
+extern "C" unsigned wcwss_bridge_capabilities() {
+  initializeCurl();
+  const auto *version = curl_version_info(CURLVERSION_NOW);
+  return (supportsProtocol("ws") ? 1u : 0u) |
+         (supportsProtocol("wss") ? 2u : 0u) |
+         ((version->features & CURL_VERSION_IPV6) ? 4u : 0u);
+}
 extern "C" int wcwss_bridge_state() { return bridgeState.load(); }
 extern "C" int wcwss_bridge_error() { return bridgeError.load(); }
 extern "C" unsigned wcwss_bridge_sends() { return bridgeSends.load(); }

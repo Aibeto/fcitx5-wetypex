@@ -13,7 +13,7 @@ jobs:
       - name: 安装构建依赖
         run: >-
           pacman -Syu --noconfirm git cmake clang boost fcitx5 fcitx5-qt libime libc++
-          json-c curl bubblewrap util-linux python qt6-base qt6-svg
+          json-c curl openssl bubblewrap util-linux python qt6-base qt6-svg
           qt6-webengine pipewire ffmpeg wl-clipboard libnotify polkit
       - uses: actions/checkout@v7
       - name: 配置
@@ -23,8 +23,47 @@ jobs:
       - name: 检查脚本
         run: |
           for script in scripts/*.sh.in; do
-            case "$script" in *-syncd.sh.in|*-update.sh.in) continue;; esac
+            case "$script" in *-syncd.sh.in|*-update.sh.in|*-sync.sh.in) continue;; esac
             sh -n "$script"
           done
           python3 -m py_compile scripts/setup_runtime.py tools/*.py \
-            build/fcitx5-wetypex-syncd build/fcitx5-wetypex-update
+            build/fcitx5-wetypex-syncd build/fcitx5-wetypex-update build/fcitx5-wetypex-sync
+
+  ubuntu-noble-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: 安装 nFPM
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+      - name: 在 Ubuntu 24.04 构建
+        run: |
+          mkdir -p dist/debian
+          docker build -f packaging/docker/debian.Dockerfile -t wetypex-build-noble .
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e WETYPEX_BUILD_JOBS=2 \
+            -v "$PWD:/src:ro" -v "$PWD/dist:/out" \
+            wetypex-build-noble /src/packaging/container-stage.sh /out/debian-root lib
+      - name: 生成 deb 与校验和
+        run: |
+          version=$(sed -n 's/^project([^ ]* VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)
+          sed -e "s|@WETYPEX_VERSION@|$version|g" \
+            -e "s|@WETYPEX_STAGE@|$PWD/dist/debian-root|g" \
+            -e "s|@WETYPEX_PROJECT_ROOT@|$PWD|g" \
+            packaging/nfpm.yaml > dist/nfpm-debian.yaml
+          "$(go env GOPATH)/bin/nfpm" package --config dist/nfpm-debian.yaml \
+            --packager deb --target dist/debian/
+          cd dist/debian
+          sha256sum fcitx5-wetypex_*.deb > SHA256SUMS
+      - name: 保存 Ubuntu 24.04 测试包
+        uses: actions/upload-artifact@v7
+        with:
+          name: fcitx5-wetypex-noble-deb
+          path: |
+            dist/debian/fcitx5-wetypex_*.deb
+            dist/debian/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

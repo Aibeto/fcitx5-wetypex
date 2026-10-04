@@ -73,7 +73,7 @@ WeTypeX 插件 ────────── 候选、预编辑、快捷键、�
 从 [GitHub Releases](https://github.com/panxuc/fcitx5-wetypex/releases/latest) 下载软件包：
 
 ```bash
-sudo pacman -U ./fcitx5-wetypex-2.2.3.657-5-x86_64.pkg.tar.zst
+sudo pacman -U ./fcitx5-wetypex-2.2.3.657-6-x86_64.pkg.tar.zst
 ```
 
 也可以从 AUR 安装：
@@ -89,15 +89,15 @@ paru -S fcitx5-wetypex
 ### Debian 与 Ubuntu
 
 ```bash
-sudo apt install ./fcitx5-wetypex_2.2.3.657-5_amd64.deb
+sudo apt install ./fcitx5-wetypex_2.2.3.657-6_amd64.deb
 ```
 
-Debian 软件包面向提供 Fcitx5 5.1、LibIME 和 Qt 6 WebEngine 的发行版；较早版本需要使用相应 backports 或升级系统组件。
+从修订 `6` 起，deb 以 Ubuntu 24.04 LTS（Noble）的 Qt 6.4、Fcitx5 5.1.7 和 glibc 2.39 为构建基线，可用于 Ubuntu 24.04 及后续版本和 Debian 13。输入插件与 Qt5/Qt6 配置插件安装到发行版的 Fcitx5 多架构目录。修订 `5` 及此前的 deb 在 Debian Trixie 构建，需要 Qt 6.8，不能直接用于 Noble。
 
 ### Fedora 与兼容的 RPM 发行版
 
 ```bash
-sudo dnf install ./fcitx5-wetypex-2.2.3.657-5.x86_64.rpm
+sudo dnf install ./fcitx5-wetypex-2.2.3.657-6.x86_64.rpm
 ```
 
 FFmpeg 及部分桌面依赖可能来自发行版启用的附加软件仓库。
@@ -159,6 +159,8 @@ fcitx5-wetypex-settings          # 打开完整设置窗口
 fcitx5-wetypex-setup --check     # 检查原版运行时
 fcitx5-wetypex-account group-info # 查看设备组和同步状态
 fcitx5-wetypex-account pairing-code # 生成新的六位匹配码
+fcitx5-wetypex-account network-info # 检查实际 libcurl 与 WS/WSS 支持
+fcitx5-wetypex-account sync-now     # 请求个人词库与常用语同步
 ```
 
 常用操作：

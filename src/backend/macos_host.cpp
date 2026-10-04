@@ -2848,6 +2848,27 @@ int main(int argc, char **argv) {
     fputs(dlerror(), stderr);
     return 2;
   }
+  if (std::string(argv[2]) == "network-info") {
+    auto version = reinterpret_cast<const char *(*)()>(
+        dlsym(RTLD_DEFAULT, "wcwss_bridge_curl_version"));
+    auto provider = reinterpret_cast<const char *(*)()>(
+        dlsym(RTLD_DEFAULT, "wcwss_bridge_curl_provider"));
+    auto capabilities = reinterpret_cast<unsigned (*)()>(
+        dlsym(RTLD_DEFAULT, "wcwss_bridge_capabilities"));
+    if (!version || !provider || !capabilities)
+      return 2;
+    const auto flags = capabilities();
+    auto report = wire::object();
+    wire::put(report.get(), "libcurl_version", std::string(version()));
+    wire::put(report.get(), "provider", std::string(provider()));
+    wire::boolean(report.get(), "ws", flags & 1);
+    wire::boolean(report.get(), "wss", flags & 2);
+    wire::boolean(report.get(), "ipv6", flags & 4);
+    wire::put(report.get(), "address_policy",
+              std::string("happy-eyeballs-200ms-with-ipv4-retry"));
+    puts(wire::dump(report.get()).c_str());
+    return (flags & 3) == 3 ? 0 : 1;
+  }
   std::string dir = argv[1], mode = argv[2], line;
   std::vector<std::string> binds, unwinds;
   std::vector<std::pair<uintptr_t, std::string>> ctors;
@@ -3123,18 +3144,7 @@ int main(int argc, char **argv) {
       // Recovered from Windows 2.1.3.18's only call site and the macOS
       // 2.2.3.657 implementation/log labels: unknown, debug, group id,
       // function mask, common-phrase version, personal-dictionary version.
-      struct GroupSyncInfo {
-        bool unknown;
-        bool debug;
-        unsigned char padding[6];
-        uint64_t groupId;
-        uint64_t functions;
-        uint64_t phraseVersion;
-        uint64_t dictionaryVersion;
-      } info{false, false, {}, groupId, functions, phraseVersion, 0};
-      static_assert(sizeof(GroupSyncInfo) == 40);
-      ((void (*)(GroupSyncInfo))syms.at("_wxime_group_sync_info_changed"))(
-          info);
+      configure_group_sync(groupId, functions, phraseVersion, 0);
       fprintf(stderr, "GROUP_SYNC_CONFIGURED group=%llu functions=%llu\n",
               groupId, functions);
     }

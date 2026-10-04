@@ -170,7 +170,7 @@ jobs:
               sed -i "s/^pkgrel=.*/pkgrel=$pkgrel/" PKGBUILD
               source_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/fcitx5-wetypex-${version}.tar.gz"
               digest="$(curl -fsSL "$source_url" | sha256sum | cut -d" " -f1)"
-              sed -i "s/^sha256sums=.*/sha256sums=(\"$digest\" \"SKIP\")/" PKGBUILD
+              sed -i "s/^sha256sums=(\"SKIP\" /sha256sums=(\"$digest\" /" PKGBUILD
               makepkg --printsrcinfo > .SRCINFO
               git config user.name wetypex-release-bot
               git config user.email actions@users.noreply.github.com

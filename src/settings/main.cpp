@@ -1231,8 +1231,28 @@ int main(int argc, char **argv) {
   auto *phraseSync = new Toggle(syncFunctions & 2);
   for (auto *control : {clipboardSync, dictionarySync, phraseSync})
     control->setEnabled(syncAvailable);
+  auto *syncNow = greenButton("立即请求同步");
+  syncNow->setEnabled(syncAvailable);
+  auto requestSync = [=, &window] {
+    syncNow->setEnabled(false);
+    runAccount(&window, {"sync-now"},
+               [=, &window](int code, const QJsonObject &result) {
+                 syncNow->setEnabled(syncAvailable);
+                 if (!code && result.value("requested").toBool())
+                   QMessageBox::information(
+                       &window, "同步",
+                       "已请求同步，请稍后检查关联设备的词库与常用语。");
+                 else
+                   QMessageBox::warning(
+                       &window, "同步",
+                       result.value("error").toString(
+                           "同步请求失败，请检查网络和输入法状态。"));
+               });
+  };
+  QObject::connect(syncNow, &QPushButton::clicked, requestSync);
   auto updateFunctions = [=, &window](bool) {
-    const int mask = (clipboardSync->isChecked() ? 1 : 0) |
+    const int mask = (syncFunctions & ~7) |
+                     (clipboardSync->isChecked() ? 1 : 0) |
                      (phraseSync->isChecked() ? 2 : 0) |
                      (dictionarySync->isChecked() ? 4 : 0);
     writeSetting("device_clipboard_sync", clipboardSync->isChecked());
@@ -1243,7 +1263,7 @@ int main(int argc, char **argv) {
     runAccount(
         &window,
         {"set-functions", QString::number(syncGroup), QString::number(mask)},
-        [=](int code, const QJsonObject &result) {
+        [=, &window](int code, const QJsonObject &result) {
           const bool ok = !code && result.value("ok").toBool();
           if (!ok) {
             QSignalBlocker a(clipboardSync), b(dictionarySync), c(phraseSync);
@@ -1253,6 +1273,9 @@ int main(int argc, char **argv) {
           }
           for (auto *control : {clipboardSync, dictionarySync, phraseSync})
             control->setEnabled(syncAvailable);
+          if (ok)
+            runAccount(&window, {"sync-now", "--refresh-state"},
+                       [](int, const QJsonObject &) {});
         });
   };
   QObject::connect(clipboardSync, &QAbstractButton::toggled, updateFunctions);
@@ -1265,6 +1288,7 @@ int main(int argc, char **argv) {
                "关联设备之间同步个人词库", dictionarySync),
        iconRow("icon_transfer_common", "常用语同步", "关联设备之间同步常用语",
                phraseSync),
+       row("同步词库与常用语", "请求关联设备的最新同步状态", syncNow),
        iconRow("icon_transfer_filetransfer", "隔空传送",
                "跨设备发送图片、视频和文件", transfer)}));
   auto *deviceLabel = new QLabel("我的设备");

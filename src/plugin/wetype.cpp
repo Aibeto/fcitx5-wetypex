@@ -779,9 +779,10 @@ class WeType : public InputMethodEngine {
     if (group <= 0)
       return;
     const auto &devices = *config_.devices;
-    int mask = (*devices.clipboardSync ? 1 : 0) |
-               (*devices.phraseSync ? 2 : 0) |
-               (*devices.dictionarySync ? 4 : 0);
+    uint64_t mask =
+        (uint64_t(wire::number(state.get(), "func_switch")) & ~uint64_t(7)) |
+        (*devices.clipboardSync ? 1 : 0) | (*devices.phraseSync ? 2 : 0) |
+        (*devices.dictionarySync ? 4 : 0);
     startProcess({WETYPE_ACCOUNT_TOOL, "set-functions", std::to_string(group),
                   std::to_string(mask)});
   }

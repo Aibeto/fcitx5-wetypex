@@ -1,6 +1,20 @@
 // Native engine IPC. All engine operations are serialized on the service
 // thread.
 #include "control.hpp"
+static void configure_group_sync(uint64_t groupId, uint64_t functions,
+                                 uint64_t phraseVersion,
+                                 uint64_t dictionaryVersion) {
+  // macOS 2.2.3.657 / Windows 2.1.3.18: the 40-byte aggregate is passed by
+  // value.
+  struct GroupSyncInfo {
+    bool unknown, debug;
+    unsigned char padding[6];
+    uint64_t groupId, functions, phraseVersion, dictionaryVersion;
+  } info{
+      false, false, {}, groupId, functions, phraseVersion, dictionaryVersion};
+  static_assert(sizeof(GroupSyncInfo) == 40);
+  ((void (*)(GroupSyncInfo))syms.at("_wxime_group_sync_info_changed"))(info);
+}
 // Verified against +[WXIMEUtil addHotWord:value:] and removeHotWord:.
 // The 80-byte aggregate is passed BY VALUE, including in the enumerator
 // callback.
@@ -278,7 +292,8 @@ static void service_loop() {
     auto client = wire::number(request.get(), "session");
     auto seq = wire::number(request.get(), "seq");
     auto epoch = wire::number(request.get(), "epoch");
-    if (source != 0 && op != "hotword_list" && op != "hotword_set") {
+    if (source != 0 && op != "hotword_list" && op != "hotword_set" &&
+        op != "group_sync") {
       transport.reply(source,
                       "{\"error\":\"management operation not allowed\"}");
       continue;
@@ -291,6 +306,18 @@ static void service_loop() {
       break;
     if (client <= 0 || seq < 0) {
       wire::put(response.get(), "error", std::string("invalid session"));
+    } else if (op == "group_sync") {
+      const auto group = wire::number(request.get(), "group_id");
+      const auto functions = wire::number(request.get(), "func_switch");
+      if (!getenv("WETYPE_NETWORK_LIVE") || group <= 0 || functions < 0) {
+        wire::put(response.get(), "error",
+                  std::string("network disabled or invalid device group"));
+      } else {
+        configure_group_sync(group, functions, 0, 0);
+        // The native core schedules synchronization asynchronously. This
+        // acknowledges the request, not a completed dictionary download.
+        wire::boolean(response.get(), "requested", true);
+      }
     } else if (op == "hotword_list" || op == "hotword_set") {
       if (op == "hotword_set") {
         auto id = wire::str(request.get(), "id"),

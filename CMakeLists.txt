@@ -20,9 +20,8 @@ find_package(Fcitx5ModuleClipboard REQUIRED)
 find_package(LibIMEPinyin REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
-pkg_check_modules(CURL REQUIRED libcurl)
 find_package(Threads REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Widgets Gui DBus Network Svg WebEngineWidgets)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Gui DBus Network Svg WebEngineWidgets)
 find_package(Fcitx5Qt6WidgetsAddons REQUIRED)
 add_executable(fcitx5-wetypex-ai-viewer src/ai/main.cpp)
 target_link_libraries(fcitx5-wetypex-ai-viewer PRIVATE Qt6::Widgets Qt6::Network Qt6::WebEngineWidgets)
@@ -52,6 +51,16 @@ set_target_properties(wetypex-config-ui PROPERTIES AUTOMOC TRUE PREFIX "lib"
 target_link_libraries(wetypex-config-ui PRIVATE Fcitx5Qt6::WidgetsAddons)
 target_compile_definitions(wetypex-config-ui PRIVATE
   WETYPE_SETTINGS="${CMAKE_INSTALL_FULL_BINDIR}/fcitx5-wetypex-settings")
+find_package(Fcitx5Qt5WidgetsAddons QUIET)
+if(TARGET Fcitx5Qt5::WidgetsAddons)
+  add_library(wetypex-config-ui-qt5 MODULE src/configui/main.cpp)
+  set_target_properties(wetypex-config-ui-qt5 PROPERTIES AUTOMOC TRUE PREFIX "lib"
+    OUTPUT_NAME "wetypexconfig" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qt5")
+  target_link_libraries(wetypex-config-ui-qt5 PRIVATE Fcitx5Qt5::WidgetsAddons)
+  target_compile_definitions(wetypex-config-ui-qt5 PRIVATE
+    WETYPE_SETTINGS="${CMAKE_INSTALL_FULL_BINDIR}/fcitx5-wetypex-settings")
+  install(TARGETS wetypex-config-ui-qt5 LIBRARY DESTINATION "${FCITX_INSTALL_ADDONDIR}/qt5")
+endif()
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
   message(FATAL_ERROR "The verified original engine sample requires Linux x86-64")
 endif()
@@ -71,6 +80,14 @@ add_dependencies(wetypex-engine-host kqueue)
 target_link_libraries(wetypex-engine-host PRIVATE PkgConfig::JSONC Threads::Threads ${CMAKE_DL_LIBS})
 target_compile_options(wetypex-engine-host PRIVATE -Wall -Wextra)
 find_program(WETYPE_CLANGXX clang++ REQUIRED)
+option(WETYPE_BUNDLED_CURL "Embed pinned WebSocket-capable libcurl in the transport bridge" ON)
+if(WETYPE_BUNDLED_CURL)
+  include(cmake/BundledCurl.cmake)
+else()
+  pkg_check_modules(CURL REQUIRED libcurl>=8.9)
+  set(WETYPE_CURL_COMPILE_FLAGS ${CURL_CFLAGS})
+  set(WETYPE_CURL_LINK_FLAGS ${CURL_LDFLAGS} -lcurl)
+endif()
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wetypex-locale.so
   COMMAND ${WETYPE_CLANGXX} -std=c++17 -stdlib=libc++ -shared -fPIC -O2
   ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/darwin_locale.cpp -ldl -pthread
@@ -79,11 +96,14 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wetypex-locale.so
 add_custom_target(wetypex-locale ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wetypex-locale.so)
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wcwss_bridge.so
   COMMAND ${WETYPE_CLANGXX} -std=c++20 -stdlib=libc++ -shared -fPIC -O2
-  ${CURL_CFLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/wcwss_bridge.cpp
-  ${CURL_LDFLAGS} -lcurl -pthread -Wl,-z,relro,-z,now
+  ${WETYPE_CURL_COMPILE_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/wcwss_bridge.cpp
+  ${WETYPE_CURL_LINK_FLAGS} -pthread -Wl,-z,relro,-z,now
   -o ${CMAKE_CURRENT_BINARY_DIR}/wcwss_bridge.so
-  DEPENDS src/backend/wcwss_bridge.cpp VERBATIM COMMAND_EXPAND_LISTS)
+  DEPENDS src/backend/wcwss_bridge.cpp ${WETYPE_CURL_LIBRARY} VERBATIM COMMAND_EXPAND_LISTS)
 add_custom_target(wetypex-wcwss-bridge ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wcwss_bridge.so)
+if(WETYPE_BUNDLED_CURL)
+  add_dependencies(wetypex-wcwss-bridge wetypex-curl)
+endif()
 add_library(wetypex MODULE src/plugin/wetype.cpp)
 set_target_properties(wetypex PROPERTIES PREFIX "")
 target_link_libraries(wetypex PRIVATE Fcitx5::Core Fcitx5::Config Fcitx5::Utils Fcitx5::Module::Clipboard LibIME::Pinyin PkgConfig::JSONC)
@@ -100,6 +120,7 @@ target_compile_options(wetypex PRIVATE -Wall -Wextra)
 configure_file(data/wetypex-addon.conf.in wetypex-addon.conf @ONLY)
 configure_file(scripts/fcitx5-wetypex-backend.sh.in fcitx5-wetypex-backend @ONLY)
 configure_file(scripts/fcitx5-wetypex-account.sh.in fcitx5-wetypex-account @ONLY)
+configure_file(scripts/fcitx5-wetypex-sync.sh.in fcitx5-wetypex-sync @ONLY)
 configure_file(scripts/fcitx5-wetypex-syncd.sh.in fcitx5-wetypex-syncd @ONLY)
 configure_file(scripts/fcitx5-wetypex-setup.sh.in fcitx5-wetypex-setup @ONLY)
 configure_file(scripts/fcitx5-wetypex-ai.sh.in fcitx5-wetypex-ai @ONLY)
@@ -111,8 +132,8 @@ file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-voice
   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-update
   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-install(TARGETS wetypex LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5)
-install(TARGETS wetypex-config-ui LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5/qt6)
+install(TARGETS wetypex LIBRARY DESTINATION "${FCITX_INSTALL_ADDONDIR}")
+install(TARGETS wetypex-config-ui LIBRARY DESTINATION "${FCITX_INSTALL_ADDONDIR}/qt6")
 install(TARGETS wetypex-engine-host RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5-wetypex)
 install(TARGETS kqueue LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5-wetypex)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wetypex-locale.so
@@ -123,6 +144,7 @@ install(FILES data/wetypex-inputmethod.conf DESTINATION ${CMAKE_INSTALL_DATADIR}
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-backend ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-account ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-syncd ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-setup ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-ai DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-voice DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-update DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wetypex-sync DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS fcitx5-wetypex-settings fcitx5-wetypex-clipboard-set fcitx5-wetypex-ai-viewer fcitx5-wetypex-transfer fcitx5-wetypex-vmode RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/wetypex-symbols.json DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5-wetypex)
 install(DIRECTORY data/themes/ DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/themes)
