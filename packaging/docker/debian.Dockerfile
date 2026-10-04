@@ -6,5 +6,5 @@ RUN apt-get update -qq && \
       libfcitx5core-dev libfcitx5config-dev libfcitx5utils-dev \
       fcitx5-modules-dev libfcitx5-qt-dev libfcitx5-qt6-dev libimecore-dev libimepinyin-dev \
       libjson-c-dev libssl-dev ca-certificates libc++-dev libc++abi-dev \
-      qt6-base-dev qt6-svg-dev qt6-webengine-dev && \
+      qtbase5-dev qt6-base-dev qt6-svg-dev qt6-webengine-dev && \
     rm -rf /var/lib/apt/lists/*

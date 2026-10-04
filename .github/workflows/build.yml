@@ -47,6 +47,9 @@ jobs:
             -e WETYPEX_BUILD_JOBS=2 \
             -v "$PWD:/src:ro" -v "$PWD/dist:/out" \
             wetypex-build-noble /src/packaging/container-stage.sh /out/debian-root lib
+          for abi in qt5 qt6; do
+            test -f "dist/debian-root/usr/lib/x86_64-linux-gnu/fcitx5/$abi/libwetypexconfig.so"
+          done
       - name: 生成 deb 与校验和
         run: |
           version=$(sed -n 's/^project([^ ]* VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)
