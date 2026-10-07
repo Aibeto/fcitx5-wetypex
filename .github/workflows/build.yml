@@ -28,6 +28,26 @@ jobs:
           done
           python3 -m py_compile scripts/setup_runtime.py tools/*.py \
             build/fcitx5-wetypex-syncd build/fcitx5-wetypex-update build/fcitx5-wetypex-sync
+      - name: 构建 Arch 软件包（启用 LTO）
+        run: |
+          python3 tools/package_release.py
+          useradd -m builder
+          chown -R builder:builder dist/arch
+          cp /etc/makepkg.conf /tmp/wetypex-makepkg.conf
+          printf '%s\n' 'OPTIONS=("${OPTIONS[@]/!lto/lto}" lto)' \
+            >> /tmp/wetypex-makepkg.conf
+          su builder -c "cd '$PWD/dist/arch' && makepkg --config /tmp/wetypex-makepkg.conf -C -f --noconfirm"
+          cd dist/arch
+          sha256sum fcitx5-wetypex-*-x86_64.pkg.tar.zst > SHA256SUMS
+      - name: 保存 Arch 测试包
+        uses: actions/upload-artifact@v7
+        with:
+          name: fcitx5-wetypex-arch-package
+          path: |
+            dist/arch/fcitx5-wetypex-*-x86_64.pkg.tar.zst
+            dist/arch/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
 
   ubuntu-noble-deb:
     runs-on: ubuntu-latest

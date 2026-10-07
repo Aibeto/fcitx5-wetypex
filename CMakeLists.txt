@@ -97,7 +97,7 @@ add_custom_target(wetypex-locale ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wetypex
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wcwss_bridge.so
   COMMAND ${WETYPE_CLANGXX} -std=c++20 -stdlib=libc++ -shared -fPIC -O2
   ${WETYPE_CURL_COMPILE_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/wcwss_bridge.cpp
-  ${WETYPE_CURL_LINK_FLAGS} -pthread -Wl,-z,relro,-z,now
+  ${WETYPE_CURL_LINK_FLAGS} -pthread -Wl,-z,relro,-z,now,-z,defs
   -o ${CMAKE_CURRENT_BINARY_DIR}/wcwss_bridge.so
   DEPENDS src/backend/wcwss_bridge.cpp ${WETYPE_CURL_LIBRARY} VERBATIM COMMAND_EXPAND_LISTS)
 add_custom_target(wetypex-wcwss-bridge ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wcwss_bridge.so)

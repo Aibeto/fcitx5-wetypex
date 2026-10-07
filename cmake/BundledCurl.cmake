@@ -22,6 +22,11 @@ ExternalProject_Add(wetypex-curl
   CMAKE_ARGS
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+    # The bridge links with clang/libc++; GCC LTO objects cannot cross that
+    # boundary. Preserve packaging/hardening flags but emit native code.
+    "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS} -fno-lto"
+    "-DCMAKE_C_FLAGS_RELEASE=${CMAKE_C_FLAGS_RELEASE} -fno-lto"
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF
     -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DBUILD_CURL_EXE=OFF
     -DBUILD_TESTING=OFF -DCURL_DISABLE_INSTALL=ON
     -DBUILD_LIBCURL_DOCS=OFF -DBUILD_MISC_DOCS=OFF
